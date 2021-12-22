@@ -72,9 +72,9 @@ extern "C" {
 typedef int EASYSSL_BOOL;
 
 
-//internal
+//forward declarations
 struct EASYSSL_SECURITY_DATA_STRUCT;
-struct EASYSSL_SOCKET;
+struct EASYSSL_SOCKET_STRUCT;
 
 
 /**
@@ -229,9 +229,10 @@ EASYSSL_BOOL EASYSSL_destroy_security_data(EASYSSL_SECURITY_DATA security_data);
  * @param address_family address family.
  * @param socket_type socket type.
  * @param protocol protocol.
+ * @param blocking if true, then the socket is blocking, else it is non-blocking.
  * @return the created socket or NULL if the operation fails.
  */
-EASYSSL_SOCKET EASYSSL_socket(EASYSSL_SECURITY_DATA security_data, int address_family, int socket_type, int protocol);
+EASYSSL_SOCKET EASYSSL_socket(EASYSSL_SECURITY_DATA security_data, int address_family, int socket_type, int protocol, EASYSSL_BOOL blocking);
 
 
 /**
@@ -253,6 +254,7 @@ EASYSSL_BOOL EASYSSL_shutdown(EASYSSL_SOCKET socket);
 
 /**
  * Closes a socket.
+ * First, it shuts down the socket.
  * @param socket socket to close.
  * @return true on success, false otherwise.
  */
@@ -279,6 +281,7 @@ EASYSSL_BOOL EASYSSL_listen(EASYSSL_SOCKET socket, int backlog);
 
 /**
  * Accepts a connection.
+ * It does not return until the connection is completed, even if the socket is asynchronous.
  * Does the SSL handshake, and the appropriate verifications.
  * @param socket socket to create a socket from.
  * @param addr address to bind the socket to.
@@ -290,6 +293,7 @@ EASYSSL_SOCKET EASYSSL_accept(EASYSSL_SOCKET socket, EASYSSL_SOCKET_ADDRESS* add
 /**
  * Connects a socket to an address.
  * Does the SSL handshake, and the appropriate verifications.
+ * It does not return until the connection is completed, even if the socket is asynchronous.
  * @param socket socket to bind.
  * @param addr address to bind the socket to.
  * @return true on success, false otherwise.
@@ -314,7 +318,7 @@ int EASYSSL_send(EASYSSL_SOCKET socket, const void* buffer, int buffer_size);
  * @param buffer_size number of bytes to receive.
  * @return bytes received, or socket status (see EASYSSL_SOCKET_STATUS enumeration).
  */
-int EASYSSL_receive(EASYSSL_SOCKET socket, void* buffer, int buffer_size);
+int EASYSSL_recv(EASYSSL_SOCKET socket, void* buffer, int buffer_size);
 
 
 /**
@@ -364,7 +368,7 @@ EASYSSL_BOOL EASYSSL_getpeername(EASYSSL_SOCKET socket, EASYSSL_SOCKET_ADDRESS* 
  * Internally, each thread has its own version of the error struct.
  * @return pointer to the thread's error struct.
  */
-EASYSSL_ERROR* EASYSSL_get_last_error();
+const EASYSSL_ERROR* EASYSSL_get_last_error();
 
 
 /**
@@ -374,7 +378,7 @@ EASYSSL_ERROR* EASYSSL_get_last_error();
  * @param buffer_size size of buffer; preferrable size: EASYSSL_ERROR_STRING_BUFFER_SIZE.
  * @return true on success, false on error.
  */
-EASYSSL_BOOL EASYSSL_get_error_string(EASYSSL_ERROR* error, char* buffer, int buffer_size);
+EASYSSL_BOOL EASYSSL_get_error_string(const EASYSSL_ERROR* error, char* buffer, int buffer_size);
 
 
 #ifdef __cplusplus

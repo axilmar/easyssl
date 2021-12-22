@@ -578,6 +578,20 @@ static EASYSSL_BOOL udp_connect(EASYSSL_SOCKET socket, const EASYSSL_SOCKET_ADDR
 }
 
 
+//set socket blocking
+static EASYSSL_BOOL set_socket_blocking(EASYSSL_SOCKET_HANDLE socket, EASYSSL_BOOL blocking) {
+#ifdef _WIN32
+    unsigned long mode = blocking ? 0 : 1;
+    return (ioctlsocket(socket, FIONBIO, &mode) == 0) ? EASYSSL_TRUE : EASYSSL_FALSE;
+#else
+    int flags = fcntl(socket, F_GETFL, 0);
+    if (flags == -1) return EASYSSL_FALSE;
+    flags = blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
+    return (fcntl(fd, F_SETFL, flags) == 0) ? EASYSSL_TRUE : EASYSSL_FALSE;
+#endif
+}
+
+
 //init
 EASYSSL_BOOL EASYSSL_init() {
 #ifdef _WIN32
@@ -679,7 +693,7 @@ EASYSSL_BOOL EASYSSL_destroy_security_data(EASYSSL_SECURITY_DATA sd) {
 
 
 //create socket
-EASYSSL_SOCKET EASYSSL_socket(EASYSSL_SECURITY_DATA sd, int af, int st, int p) {
+EASYSSL_SOCKET EASYSSL_socket(EASYSSL_SECURITY_DATA sd, int af, int st, int p, EASYSSL_BOOL blocking) {
     EASYSSL_SOCKET_STRUCT* sock;
 
     //check params
@@ -694,6 +708,12 @@ EASYSSL_SOCKET EASYSSL_socket(EASYSSL_SECURITY_DATA sd, int af, int st, int p) {
     //handle socket creation error
     if (handle < 0) {
         handle_socket_error();
+        return NULL;
+    }
+
+    //set the socket to non-blocking if requested
+    if (!blocking && !set_socket_blocking(handle, EASYSSL_FALSE)) {
+        close_socket(handle);
         return NULL;
     }
 
@@ -748,6 +768,11 @@ EASYSSL_BOOL EASYSSL_shutdown(EASYSSL_SOCKET socket) {
 
     //clear errors, in order to later find out which error mechanism was used
     clear_errors();
+
+    //if already shutdown
+    if (SSL_get_shutdown(socket->ssl)) {
+        return EASYSSL_TRUE;
+    }
 
     //shutdown
     int r = SSL_shutdown(socket->ssl);
@@ -971,7 +996,7 @@ int EASYSSL_send(EASYSSL_SOCKET socket, const void* buffer, int buffer_size) {
 
 
 //receive data
-int EASYSSL_receive(EASYSSL_SOCKET socket, void* buffer, int buffer_size) {
+int EASYSSL_recv(EASYSSL_SOCKET socket, void* buffer, int buffer_size) {
     int r;
 
     //check param
@@ -1101,13 +1126,13 @@ EASYSSL_BOOL EASYSSL_getpeername(EASYSSL_SOCKET socket, EASYSSL_SOCKET_ADDRESS* 
 
 
 //get error
-EASYSSL_ERROR* EASYSSL_get_last_error() {
+const EASYSSL_ERROR* EASYSSL_get_last_error() {
     return &thread_error;
 }
 
 
 //Retrieves the string that corresponds to the given error.
-EASYSSL_BOOL EASYSSL_get_error_string(EASYSSL_ERROR* error, char* buffer, int buffer_size) {
+EASYSSL_BOOL EASYSSL_get_error_string(const EASYSSL_ERROR* error, char* buffer, int buffer_size) {
     //check params
     if (!error || !buffer || buffer_size <= 0) {
         set_errno(EINVAL);

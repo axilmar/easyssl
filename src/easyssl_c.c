@@ -2,6 +2,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
+#include <openssl/engine.h>
 #include "easyssl.h"
 
 
@@ -107,6 +108,10 @@ static int log_level = EASYSSL_LOG_LEVEL_NOTHING;
 #else
 static int log_level = EASYSSL_LOG_LEVEL_ERROR;
 #endif
+
+
+//crypto locks
+static MUTEX* crypto_mutexes = NULL;
 
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -395,6 +400,17 @@ static EASYSSL_BOOL socket_error_is_wait() {
 }
 
 
+//crypto locking callback
+static void crypto_locking_callback(int mode, int type, const char* file, int line) {
+    if (mode & CRYPTO_LOCK) {
+        lock_mutex(crypto_mutexes + type);
+    }
+    else {
+        unlock_mutex(crypto_mutexes + type);
+    }
+}
+
+
 //////////////////////////////////////////////////
 //  SHUTDOWN FUNCTIONS
 //////////////////////////////////////////////////
@@ -581,6 +597,10 @@ static EASYSSL_BOOL load_security_data(EASYSSL_SECURITY_DATA_STRUCT* sd, SSL_CTX
         goto FAILURE;
     }
 
+    SSL_CTX_use_certificate_file(ctx, "certs/ca.cert.pem", SSL_FILETYPE_PEM);
+
+    SSL_CTX_set_cipher_list(ctx, "HIGH:!aNULL:!kRSA:!PSK:!SRP:!MD5:!RC4");
+
     //success
     return EASYSSL_TRUE;
 
@@ -606,6 +626,9 @@ static SSL_CTX* handle_context_creation(EASYSSL_SECURITY_DATA_STRUCT* sd, SSL_CT
         return NULL;
     }
 
+    //set the verification mode
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+
     //success; set the sd member; return the context
     *sd_member = ctx;
     return ctx;
@@ -624,6 +647,11 @@ static SSL_CTX* tcp_get_or_create_server_context(EASYSSL_SECURITY_DATA_STRUCT* s
 
     //create the context
     SSL_CTX* result = handle_context_creation(sd, &sd->tcp_server_ctx, SSL_CTX_new(TLS_server_method()));
+
+    //if failure
+    if (!result) {
+        return NULL;
+    }
 
     //set cookie verification methods
     SSL_CTX_set_stateless_cookie_generate_cb(result, generate_cookie);
@@ -656,11 +684,13 @@ static SSL_CTX* tcp_get_or_create_client_context(EASYSSL_SECURITY_DATA_STRUCT* s
 
 //verify connection
 static EASYSSL_BOOL verify_connection(SSL* ssl) {
+    /*
     //if there is no certificate, fail
     if (!SSL_get0_peer_certificate(ssl)) {
         set_error(EASYSSL_ERROR_EASYSSL, EASYSSL_ERROR_NO_PEER_CERTIFICATE);
         return EASYSSL_FALSE;
     }
+    */
 
     //if verification failed, fail
     long lr = SSL_get_verify_result(ssl);
@@ -1072,27 +1102,62 @@ static EASYSSL_BOOL udp_connect(EASYSSL_SOCKET socket, const EASYSSL_SOCKET_ADDR
 
 //init
 EASYSSL_BOOL EASYSSL_init() {
-#ifdef _WIN32
+    //init sockets
+    #ifdef _WIN32
     WSADATA wsadata;
     int r = WSAStartup(MAKEWORD(2, 2), &wsadata);
     if (r) {
         set_error(EASYSSL_ERROR_WINSOCK, WSAGetLastError());
         return EASYSSL_FALSE;
     }
-#endif
+    #endif
+
+    //init openssl
+    SSL_library_init();
+    OpenSSL_add_ssl_algorithms();
+    OpenSSL_add_all_algorithms();
+    SSL_load_error_strings();
+    ERR_load_crypto_strings();
+    OpenSSL_add_all_ciphers();
+    OpenSSL_add_all_digests();
+    ENGINE_load_builtin_engines();
+
+    //init crypto locking
+    crypto_mutexes = (MUTEX*)malloc(sizeof(MUTEX) * CRYPTO_num_locks());
+    for (size_t i = 0; i < CRYPTO_num_locks(); ++i) {
+        init_mutex(crypto_mutexes + i);
+    }
+    CRYPTO_set_locking_callback(crypto_locking_callback);
+
     return EASYSSL_TRUE;
 }
 
 
 //cleanup
 EASYSSL_BOOL EASYSSL_cleanup() {
-#ifdef _WIN32
+    //cleanup crypto locking
+    CRYPTO_set_locking_callback(NULL);
+    for (size_t i = 0; i < CRYPTO_num_locks(); ++i) {
+        destroy_mutex(crypto_mutexes + i);
+    }
+    free(crypto_mutexes);
+
+    //clenaup openssl
+    ENGINE_cleanup();
+    CONF_modules_unload(1);
+    EVP_cleanup();
+    CRYPTO_cleanup_all_ex_data();
+    ERR_free_strings();
+
+    //cleanup sockets
+    #ifdef _WIN32
     int r = WSACleanup();
     if (r) {
         set_error(EASYSSL_ERROR_WINSOCK, WSAGetLastError());
         return EASYSSL_FALSE;
     }
-#endif
+    #endif
+
     return EASYSSL_TRUE;
 }
 

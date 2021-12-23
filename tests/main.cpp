@@ -9,7 +9,7 @@ using namespace testlib;
 using namespace easyssl;
 
 
-static void test_tcp_one_server_one_client(const security_data& sd) {
+static void test_tcp_one_server_one_client() {
     socket_address server_addr(INADDR_LOOPBACK, 10000);
     static constexpr size_t test_message_count = 10;
     const std::string test_message = "hello server!!!";
@@ -19,6 +19,7 @@ static void test_tcp_one_server_one_client(const security_data& sd) {
 
         std::thread server_thread([&]() {
             try {
+                security_data sd("certs/server.cert.pem", "certs/server.key.pem");
                 easyssl::socket server_socket(sd, AF_INET, SOCK_STREAM, 0);
                 server_socket.bind(server_addr);
                 server_socket.listen();
@@ -40,6 +41,7 @@ static void test_tcp_one_server_one_client(const security_data& sd) {
 
         std::thread client_thread([&]() {
             try {
+                security_data sd("certs/client.cert.pem", "certs/client.key.pem");
                 easyssl::socket client_socket(sd, AF_INET, SOCK_STREAM, 0);
                 client_socket.connect(server_addr);
                 for (size_t i = 0; i < test_message_count; ++i) {
@@ -60,9 +62,8 @@ static void test_tcp_one_server_one_client(const security_data& sd) {
 
 
 int main() {
-    security_data sd("netlib.pem", "netlib.key");
     testlib::init();
-    test_tcp_one_server_one_client(sd);
+    test_tcp_one_server_one_client();
     testlib::cleanup();
     system("pause");
     return 0;

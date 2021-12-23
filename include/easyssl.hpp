@@ -148,6 +148,18 @@ namespace easyssl {
          * @param key_file path to private key.
          * @exception easy_ssl::error thrown if there is an error.
          */
+        security_data(const char* ca_path, const char* ca_file, const char* key_file)
+            : security_data(ca_path, ca_file, nullptr, nullptr, key_file)
+        {
+        }
+
+        /**
+         * Constructor from parameters.
+         * It creates a security data object.
+         * @param ca_file path to certificate authorities file.
+         * @param key_file path to private key.
+         * @exception easy_ssl::error thrown if there is an error.
+         */
         security_data(const char* ca_file, const char* key_file)
             : security_data(nullptr, ca_file, nullptr, nullptr, key_file)
         {

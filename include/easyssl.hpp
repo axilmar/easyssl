@@ -173,7 +173,10 @@ namespace easyssl {
             closed = EASYSSL_SOCKET_CLOSED,
 
             ///retry.
-            retry = EASYSSL_SOCKET_RETRY
+            retry = EASYSSL_SOCKET_RETRY,
+
+            ///success.
+            ok = EASYSSL_SOCKET_OK
         };
 
         /**
@@ -241,24 +244,55 @@ namespace easyssl {
 
         /**
          * Accepts a connection from a client.
+         * @param new_socket new socket.
          * @param addr address of sender.
-         * @return new socket.
+         * @return i/o result.
          * @exception easyssl::error thrown if there was an error.
          */
-        socket accept(socket_address& addr) {
-            EASYSSL_SOCKET s = EASYSSL_accept(m_socket.get(), &addr.addr);
-             return s ? socket{ m_security_data, std::shared_ptr<EASYSSL_SOCKET_STRUCT>{s, EASYSSL_close} } : throw error(*EASYSSL_get_last_error());
+        io_result accept(socket& new_socket, socket_address& addr) {
+            EASYSSL_SOCKET s;
+            
+            switch (EASYSSL_accept(m_socket.get(), &s, &addr.addr)) {
+                case EASYSSL_SOCKET_CLOSED:
+                    return io_result::closed;
+
+                case EASYSSL_SOCKET_RETRY:
+                    return io_result::retry;
+
+                case EASYSSL_SOCKET_ERROR:
+                    throw error(*EASYSSL_get_last_error());
+
+                case EASYSSL_SOCKET_OK:
+                    new_socket.m_security_data = m_security_data;
+                    new_socket.m_socket = std::shared_ptr<EASYSSL_SOCKET_STRUCT>{s, EASYSSL_close};
+                    return io_result::ok;
+            }
+
+            throw std::logic_error("Unreachable code");
         }
 
         /**
          * Connects to a server.
          * @param addr address of server.
+         * @return i/o result.
          * @exception easyssl::error thrown if there was an error.
          */
-        void connect(const socket_address& addr) {
-            if (!EASYSSL_connect(m_socket.get(), &addr.addr)) {
-                throw error(*EASYSSL_get_last_error());
+        io_result connect(const socket_address& addr) {
+            switch (EASYSSL_connect(m_socket.get(), &addr.addr)) {
+                case EASYSSL_SOCKET_CLOSED:
+                    return io_result::closed;
+
+                case EASYSSL_SOCKET_RETRY:
+                    return io_result::retry;
+
+                case EASYSSL_SOCKET_ERROR:
+                    throw error(*EASYSSL_get_last_error());
+
+                case EASYSSL_SOCKET_OK:
+                    return io_result::ok;
             }
+
+            throw std::logic_error("Unreachable code");
         }
 
         /**

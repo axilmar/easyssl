@@ -171,17 +171,33 @@ enum EASYSSL_SOCKET_STATUS {
     /**
      * Socket closed.
      */
-    EASYSSL_SOCKET_CLOSED = 0,
+    EASYSSL_SOCKET_CLOSED = -2,
+
+    /**
+     * Socket operation needs retry.
+     */
+    EASYSSL_SOCKET_RETRY = -1,
 
     /**
      * Socket error.
      */
-    EASYSSL_SOCKET_ERROR = -1,
+    EASYSSL_SOCKET_ERROR = 0,
 
     /**
-     * Socket retry.
+     * Operation completed successfully. 
      */
-    EASYSSL_SOCKET_RETRY = -2
+    EASYSSL_SOCKET_OK = 1
+};
+
+
+/**
+ * easy sll errors 
+ */
+enum EASYSSL_ERROR_NUMBER {
+    /**
+     * Peer had no certificate. 
+     */
+    EASYSSL_ERROR_NO_PEER_CERTIFICATE
 };
 
 
@@ -247,9 +263,9 @@ EASYSSL_SOCKET_HANDLE EASYSSL_get_socket_handle(EASYSSL_SOCKET socket);
 /**
  * Shuts down a socket.
  * @param socket socket to shut down.
- * @return true on success, false otherwise.
+ * @return socket status (see EASYSSL_SOCKET_STATUS enumeration).
  */
-EASYSSL_BOOL EASYSSL_shutdown(EASYSSL_SOCKET socket);
+int EASYSSL_shutdown(EASYSSL_SOCKET socket);
 
 
 /**
@@ -281,24 +297,23 @@ EASYSSL_BOOL EASYSSL_listen(EASYSSL_SOCKET socket, int backlog);
 
 /**
  * Accepts a connection.
- * It does not return until the connection is completed, even if the socket is asynchronous.
  * Does the SSL handshake, and the appropriate verifications.
  * @param socket socket to create a socket from.
+ * @param new_socket pointer to set the new socket to.
  * @param addr address to bind the socket to.
- * @return new socket for client or NULL if the operation fails.
+ * @return socket status (see EASYSSL_SOCKET_STATUS enumeration).
  */
-EASYSSL_SOCKET EASYSSL_accept(EASYSSL_SOCKET socket, EASYSSL_SOCKET_ADDRESS* addr);
+int EASYSSL_accept(EASYSSL_SOCKET socket, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr);
 
 
 /**
  * Connects a socket to an address.
  * Does the SSL handshake, and the appropriate verifications.
- * It does not return until the connection is completed, even if the socket is asynchronous.
  * @param socket socket to bind.
  * @param addr address to bind the socket to.
- * @return true on success, false otherwise.
+ * @return socket status (see EASYSSL_SOCKET_STATUS enumeration).
  */
-EASYSSL_BOOL EASYSSL_connect(EASYSSL_SOCKET socket, const EASYSSL_SOCKET_ADDRESS* addr);
+int EASYSSL_connect(EASYSSL_SOCKET socket, const EASYSSL_SOCKET_ADDRESS* addr);
 
 
 /**

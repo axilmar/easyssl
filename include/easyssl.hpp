@@ -118,56 +118,82 @@ namespace easyssl {
     class security_data {
     public:
         /**
-         * Empty constructor.
+         * The default constructor.
+         * An empty security data object is created.
          */
-        security_data() {
+        security_data()
+            : m_security_data(EASYSSL_create_security_data(), EASYSSL_destroy_security_data)
+        {
         }
 
         /**
-         * Constructor from parameters.
-         * It creates a security data object.
-         * @param ca_path optional path to certificate authorities file directory.
-         * @param ca_file optional path to certificate authorities file.
-         * @param ca_store optional certificate authorities store.
-         * @param ca_chain_file optional certificate authorities chain file.
-         * @param key_file path to private key.
-         * @exception easy_ssl::error thrown if there is an error.
+         * Adds a verification directory.
+         * @param dir directory.
+         * @exception easyssl::error thrown if there was an error.
          */
-        security_data(const char* ca_path, const char* ca_file, const char* ca_store, const char* ca_chain_file, const char* key_file) 
-            : m_security_data(EASYSSL_create_security_data(ca_path, ca_file, ca_store, ca_chain_file, key_file), EASYSSL_destroy_security_data)
-        {
-            if (!m_security_data.get()) {
+        void add_verify_dir(const char* dir) {
+            if (!EASYSSL_add_verify_dir(m_security_data.get(), dir)) {
                 throw error(*EASYSSL_get_last_error());
             }
         }
 
         /**
-         * Constructor from parameters.
-         * It creates a security data object.
-         * @param ca_file path to certificate authorities file.
-         * @param key_file path to private key.
-         * @exception easy_ssl::error thrown if there is an error.
+         * Adds a verification file.
+         * @param file file.
+         * @exception easyssl::error thrown if there was an error.
          */
-        security_data(const char* ca_path, const char* ca_file, const char* key_file)
-            : security_data(ca_path, ca_file, nullptr, nullptr, key_file)
-        {
+        void add_verify_file(const char* file) {
+            if (!EASYSSL_add_verify_file(m_security_data.get(), file)) {
+                throw error(*EASYSSL_get_last_error());
+            }
         }
 
         /**
-         * Constructor from parameters.
-         * It creates a security data object.
-         * @param ca_file path to certificate authorities file.
-         * @param key_file path to private key.
-         * @exception easy_ssl::error thrown if there is an error.
+         * Adds a verification store.
+         * @param store store.
+         * @exception easyssl::error thrown if there was an error.
          */
-        security_data(const char* ca_file, const char* key_file)
-            : security_data(nullptr, ca_file, nullptr, nullptr, key_file)
-        {
+        void add_verify_store(const char* store) {
+            if (!EASYSSL_add_verify_store(m_security_data.get(), store)) {
+                throw error(*EASYSSL_get_last_error());
+            }
+        }
+
+        /**
+         * Adds a certificate chain file.
+         * @param file file.
+         * @exception easyssl::error thrown if there was an error.
+         */
+        void add_certificate_chain_file(const char* file) {
+            if (!EASYSSL_add_certificate_chain_file(m_security_data.get(), file)) {
+                throw error(*EASYSSL_get_last_error());
+            }
+        }
+
+        /**
+         * Adds a certificate file.
+         * @param file file.
+         * @exception easyssl::error thrown if there was an error.
+         */
+        void add_certificate_file(const char* file) {
+            if (!EASYSSL_add_certificate_file(m_security_data.get(), file)) {
+                throw error(*EASYSSL_get_last_error());
+            }
+        }
+
+        /**
+         * Adds a private key file.
+         * @param file file.
+         * @exception easyssl::error thrown if there was an error.
+         */
+        void add_private_key_file(const char* file) {
+            if (!EASYSSL_add_private_key_file(m_security_data.get(), file)) {
+                throw error(*EASYSSL_get_last_error());
+            }
         }
 
     private:
         std::shared_ptr<EASYSSL_SECURITY_DATA_STRUCT> m_security_data;
-
         friend class socket;
     };
 

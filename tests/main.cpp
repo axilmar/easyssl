@@ -19,7 +19,10 @@ static void test_tcp_one_server_one_client() {
 
         std::thread server_thread([&]() {
             try {
-                security_data sd("certs/server.cert.pem", "certs/server.key.pem");
+                security_data sd;
+                sd.add_verify_file("certs/ca.cert.pem");
+                sd.add_certificate_file("certs/server.cert.pem");
+                sd.add_private_key_file("certs/server.key.pem");
                 easyssl::socket server_socket(sd, AF_INET, SOCK_STREAM, 0);
                 server_socket.bind(server_addr);
                 server_socket.listen();
@@ -41,7 +44,10 @@ static void test_tcp_one_server_one_client() {
 
         std::thread client_thread([&]() {
             try {
-                security_data sd("certs/client.cert.pem", "certs/client.key.pem");
+                security_data sd;
+                sd.add_verify_file("certs/ca.cert.pem");
+                sd.add_certificate_file("certs/client.cert.pem");
+                sd.add_private_key_file("certs/client.key.pem");
                 easyssl::socket client_socket(sd, AF_INET, SOCK_STREAM, 0);
                 client_socket.connect(server_addr);
                 for (size_t i = 0; i < test_message_count; ++i) {

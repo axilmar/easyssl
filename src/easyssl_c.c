@@ -28,6 +28,18 @@
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 
+//declare array type
+#define ARRAY_TYPE(ELEMENT_TYPE, NAME)\
+    typedef struct NAME {\
+        ELEMENT_TYPE* data;\
+        size_t count;\
+    } NAME;
+
+
+//string array
+ARRAY_TYPE(char*, STRING_ARRAY)
+
+
 //socket retry mode
 enum SOCKET_RETRY_MODE {
     SOCKET_RETRY_NONE,
@@ -50,12 +62,15 @@ typedef struct EASYSSL_SECURITY_DATA_STRUCT {
     //mutex since this can be used by many threads within EASYSSL_connect().
     MUTEX mutex;
 
-    //paths
-    char* ca_path;
-    char* ca_file;
-    char* ca_store;
-    char* ca_chain_file;
-    char* key_file;
+    //verify resources
+    STRING_ARRAY verify_dirs;
+    STRING_ARRAY verify_files;
+    STRING_ARRAY verify_stores;
+
+    //rsources
+    STRING_ARRAY certificate_chain_files;
+    STRING_ARRAY certificate_files;
+    STRING_ARRAY private_key_files;
 
     //contexts
     SSL_CTX* tcp_server_ctx;
@@ -135,6 +150,40 @@ static int destroy_mutex(MUTEX* m) { pthread_mutex_destroy(m); }
 static int lock_mutex(MUTEX* m) { pthread_mutex_lock(m); }
 static int unlock_mutex(MUTEX* m) { pthread_mutex_unlock(m); }
 #endif
+
+
+//////////////////////////////////////////////////
+//  ARRAY FUNCTIONS
+//////////////////////////////////////////////////
+
+
+//array static initialization
+#define ARRAY_INIT { NULL, 0 }
+
+
+//array for each
+#define ARRAY_FOR_EACH(A, CONTEXT, CB)\
+    for(size_t i = 0; i < (A).count; ++i) {\
+        CB(CONTEXT, (A).data[i]);\
+    }
+
+
+//array add
+#define ARRAY_ADD(A, ELEM_TYPE, ELEM, COPY_CB) {\
+        (A).data = (ELEM_TYPE*)realloc((A).data, sizeof(ELEM_TYPE) * ((A).count + 1));\
+        (A).data[(A).count] = COPY_CB(ELEM);\
+        ++(A).count;\
+    }
+
+
+//array cleanup
+#define ARRAY_CLEANUP(A, DELETE_CB)\
+    {\
+        for(size_t i = (A).count; i > 0; --i) {\
+            DELETE_CB((A).data[i - 1]);\
+        }\
+        free((A).data);\
+    }
 
 
 //////////////////////////////////////////////////
@@ -273,12 +322,20 @@ static void set_errno_va_list(int err, const char* format, va_list args) {
 }
 
 
+//clears the thread error
+static void clear_thread_error() {
+    thread_error.category = 0;
+    thread_error.number = 0;
+}
+
+
 //clears all errors
 static void clear_errors() {
+    clear_thread_error();
     errno = 0;
-#ifdef _WIN32
+    #ifdef _WIN32
     WSASetLastError(0);
-#endif
+    #endif
     ERR_clear_error();
 }
 
@@ -562,6 +619,18 @@ static void delete_cookie_verify_context(SSL* ssl) {
 //////////////////////////////////////////////////
 
 
+//add resource macro
+#define ADD_SECURITY_DATA_RESOURCE(SD, A, VAL)\
+{\
+    if (!SD) {\
+        set_einval("Security data pointer is null in function %s.", __func__);\
+        return EASYSSL_FALSE;\
+    }\
+    ARRAY_ADD(A, char*, VAL, strdup);\
+    return EASYSSL_TRUE;\
+}
+
+
 //destroy context
 static void destroy_context(SSL_CTX* ctx) {
     if (ctx) {
@@ -570,45 +639,74 @@ static void destroy_context(SSL_CTX* ctx) {
 }
 
 
+//loads a verify dir
+static void load_verify_dir(SSL_CTX* ctx, const char* dir) {
+    if (SSL_CTX_load_verify_dir(ctx, dir) != 1) {
+        set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+    }
+}
+
+
+//loads a verify file
+static void load_verify_file(SSL_CTX* ctx, const char* file) {
+    if (SSL_CTX_load_verify_file(ctx, file) != 1) {
+        set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+    }
+}
+
+
+//loads a verify store
+static void load_verify_store(SSL_CTX* ctx, const char* store) {
+    if (SSL_CTX_load_verify_store(ctx, store) != 1) {
+        set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+    }
+}
+
+
+//uses a certificate chain file
+static void use_certificate_chain_file(SSL_CTX* ctx, const char* file) {
+    if (SSL_CTX_use_certificate_chain_file(ctx, file) != 1) {
+        set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+    }
+}
+
+
+//uses a certificate file
+static void use_certificate_file(SSL_CTX* ctx, const char* file) {
+    if (SSL_CTX_use_certificate_file(ctx, file, SSL_FILETYPE_PEM) != 1) {
+        set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+    }
+}
+
+
+//uses a private key file
+static void use_private_key_file(SSL_CTX* ctx, const char* file) {
+    if (SSL_CTX_use_PrivateKey_file(ctx, file, SSL_FILETYPE_PEM) != 1) {
+        set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+    }
+}
+
+
 //load the certificates/key for a context
 static EASYSSL_BOOL load_security_data(EASYSSL_SECURITY_DATA_STRUCT* sd, SSL_CTX* ctx) {
-    //chain file
-    if (sd->ca_chain_file && SSL_CTX_use_certificate_chain_file(ctx, sd->ca_chain_file) != 1) {
-        goto FAILURE;
+    //clear error
+    clear_thread_error();
+
+    //load files
+    ARRAY_FOR_EACH(sd->verify_dirs            , ctx, load_verify_dir           );
+    ARRAY_FOR_EACH(sd->verify_files           , ctx, load_verify_file          );
+    ARRAY_FOR_EACH(sd->verify_stores          , ctx, load_verify_store         );
+    ARRAY_FOR_EACH(sd->certificate_chain_files, ctx, use_certificate_chain_file);
+    ARRAY_FOR_EACH(sd->certificate_files      , ctx, use_certificate_file      );
+    ARRAY_FOR_EACH(sd->private_key_files      , ctx, use_private_key_file      );
+
+    //if there was an error
+    if (thread_error.number) {
+        return EASYSSL_FALSE;
     }
-
-    //file
-    if (sd->ca_file && SSL_CTX_use_certificate_file(ctx, sd->ca_file, SSL_FILETYPE_PEM) != 1) {
-        goto FAILURE;
-    }
-
-    //path
-    if (sd->ca_path && SSL_CTX_load_verify_dir(ctx, sd->ca_path) != 1) {
-        goto FAILURE;
-    }
-
-    //store
-    if (sd->ca_store && SSL_CTX_load_verify_store(ctx, sd->ca_store) != 1) {
-        goto FAILURE;
-    }
-
-    //key file
-    if (SSL_CTX_use_PrivateKey_file(ctx, sd->key_file, SSL_FILETYPE_PEM) != 1) {
-        goto FAILURE;
-    }
-
-    SSL_CTX_use_certificate_file(ctx, "certs/ca.cert.pem", SSL_FILETYPE_PEM);
-
-    SSL_CTX_set_cipher_list(ctx, "HIGH:!aNULL:!kRSA:!PSK:!SRP:!MD5:!RC4");
 
     //success
     return EASYSSL_TRUE;
-
-    //failure
-    FAILURE:
-    set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
-    return EASYSSL_FALSE;
-
 }
 
 
@@ -625,6 +723,9 @@ static SSL_CTX* handle_context_creation(EASYSSL_SECURITY_DATA_STRUCT* sd, SSL_CT
         SSL_CTX_free(ctx);
         return NULL;
     }
+
+    //set the cipher list
+    SSL_CTX_set_cipher_list(ctx, OSSL_default_ciphersuites());
 
     //set the verification mode
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
@@ -1163,7 +1264,7 @@ EASYSSL_BOOL EASYSSL_cleanup() {
 
 
 //create security data
-EASYSSL_SECURITY_DATA EASYSSL_create_security_data(const char* ca_path, const char* ca_file, const char* ca_store, const char* ca_chain_file, const char* key_file) {
+EASYSSL_SECURITY_DATA EASYSSL_create_security_data() {
     EASYSSL_SECURITY_DATA_STRUCT* sd;
 
     //allocate sd
@@ -1175,36 +1276,51 @@ EASYSSL_SECURITY_DATA EASYSSL_create_security_data(const char* ca_path, const ch
         return NULL;
     }
 
-    //copy the strings
-    int ok = 1;
-    ok &= copy_string(&sd->ca_path, ca_path);
-    ok &= copy_string(&sd->ca_file, ca_file);
-    ok &= copy_string(&sd->ca_store, ca_store);
-    ok &= copy_string(&sd->ca_chain_file, ca_chain_file);
-    ok &= copy_string(&sd->key_file, key_file);
-
-    //if there was a string copy failure
-    if (!ok) {
-        free(sd->ca_path);
-        free(sd->ca_file);
-        free(sd->ca_store);
-        free(sd->ca_chain_file);
-        free(sd->key_file);
-        free(sd);
-        return NULL;
-    }
+    //reset sd
+    memset(sd, 0, sizeof(EASYSSL_SECURITY_DATA_STRUCT));
 
     //init other fields
     init_mutex(&sd->mutex);
-    sd->tcp_server_ctx = NULL;
-    sd->udp_server_ctx = NULL;
-    sd->tcp_client_ctx = NULL;
-    sd->udp_client_ctx = NULL;
 
     //success
     return sd;
 }
 
+
+//adds a verify dir
+EASYSSL_BOOL EASYSSL_add_verify_dir(EASYSSL_SECURITY_DATA sd, const char* dir) {
+    ADD_SECURITY_DATA_RESOURCE(sd, sd->verify_dirs, dir);
+}
+
+
+//Adds a verify file.
+EASYSSL_BOOL EASYSSL_add_verify_file(EASYSSL_SECURITY_DATA sd, const char* file) {
+    ADD_SECURITY_DATA_RESOURCE(sd, sd->verify_files, file);
+}
+
+
+//Adds a verify store.
+EASYSSL_BOOL EASYSSL_add_verify_store(EASYSSL_SECURITY_DATA sd, const char* store) {
+    ADD_SECURITY_DATA_RESOURCE(sd, sd->verify_stores, store);
+}
+
+
+//Adds a certificate chain file.
+EASYSSL_BOOL EASYSSL_add_certificate_chain_file(EASYSSL_SECURITY_DATA sd, const char* file) {
+    ADD_SECURITY_DATA_RESOURCE(sd, sd->certificate_chain_files, file);
+}
+
+
+//Adds a certificate file.
+EASYSSL_BOOL EASYSSL_add_certificate_file(EASYSSL_SECURITY_DATA sd, const char* file) {
+    ADD_SECURITY_DATA_RESOURCE(sd, sd->certificate_files, file);
+}
+
+
+//Adds a key file.
+EASYSSL_BOOL EASYSSL_add_private_key_file(EASYSSL_SECURITY_DATA sd, const char* file) {
+    ADD_SECURITY_DATA_RESOURCE(sd, sd->private_key_files, file);
+}
 
 
 //destroy security data
@@ -1223,12 +1339,12 @@ EASYSSL_BOOL EASYSSL_destroy_security_data(EASYSSL_SECURITY_DATA sd) {
 
     //free resources
     destroy_mutex(&sd->mutex);
-    free(sd->ca_path);
-    free(sd->ca_file);
-    free(sd->ca_store);
-    free(sd->ca_chain_file);
-    free(sd->key_file);
-    free(sd);
+    ARRAY_CLEANUP(sd->verify_dirs, free);
+    ARRAY_CLEANUP(sd->verify_files, free);
+    ARRAY_CLEANUP(sd->verify_stores, free);
+    ARRAY_CLEANUP(sd->certificate_chain_files, free);
+    ARRAY_CLEANUP(sd->certificate_files, free);
+    ARRAY_CLEANUP(sd->private_key_files, free);
 
     //success
     return EASYSSL_TRUE;

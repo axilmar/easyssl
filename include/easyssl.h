@@ -247,16 +247,63 @@ EASYSSL_BOOL EASYSSL_cleanup();
 
 /**
  * Creates the security data required for creating a secure socket.
- * One of the certificate authorities paths/files must be valid; the key file must be valid.
- * File types are PEM.
- * @param ca_path optional path to certificate authorities file directory.
- * @param ca_file optional path to certificate authorities file.
- * @param ca_store optional certificate authorities store.
- * @param ca_chain_file optional certificate authorities chain file.
- * @param key_file path to private key.
  * @return security data or NULL if the operation fails.
  */
-EASYSSL_SECURITY_DATA EASYSSL_create_security_data(const char* ca_path, const char* ca_file, const char* ca_store, const char* ca_chain_file, const char* key_file);
+EASYSSL_SECURITY_DATA EASYSSL_create_security_data();
+
+
+/**
+ * Adds a verify directory.
+ * @param sd security data.
+ * @param dir directory.
+ * @return true on success, false on failure.
+ */
+EASYSSL_BOOL EASYSSL_add_verify_dir(EASYSSL_SECURITY_DATA sd, const char* dir);
+
+
+/**
+ * Adds a verify file.
+ * @param sd security data.
+ * @param file file.
+ * @return true on success, false on failure.
+ */
+EASYSSL_BOOL EASYSSL_add_verify_file(EASYSSL_SECURITY_DATA sd, const char* file);
+
+
+/**
+ * Adds a verify store.
+ * @param sd security data.
+ * @param store store.
+ * @return true on success, false on failure.
+ */
+EASYSSL_BOOL EASYSSL_add_verify_store(EASYSSL_SECURITY_DATA sd, const char* store);
+
+
+/**
+ * Adds a certificate chain file.
+ * @param sd security data.
+ * @param file file.
+ * @return true on success, false on failure.
+ */
+EASYSSL_BOOL EASYSSL_add_certificate_chain_file(EASYSSL_SECURITY_DATA sd, const char* file);
+
+
+/**
+ * Adds a certificate file.
+ * @param sd security data.
+ * @param file file.
+ * @return true on success, false on failure.
+ */
+EASYSSL_BOOL EASYSSL_add_certificate_file(EASYSSL_SECURITY_DATA sd, const char* file);
+
+
+/**
+ * Adds a private key file.
+ * @param sd security data.
+ * @param file file.
+ * @return true on success, false on failure.
+ */
+EASYSSL_BOOL EASYSSL_add_private_key_file(EASYSSL_SECURITY_DATA sd, const char* file);
 
 
 /**

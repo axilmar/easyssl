@@ -142,6 +142,10 @@ static int unlock_mutex(MUTEX* m) { pthread_mutex_unlock(m); }
 
 //get datetime string
 static void get_datetime_str(char* buffer, int size) {
+    time_t timeval = time(NULL);
+    struct tm tms;
+    localtime_s(&tms , &timeval);
+    strftime(buffer, size, "%Y-%m-%e %H:%M:%S", &tms);
 }
 
 
@@ -357,8 +361,8 @@ static void close_socket(EASYSSL_SOCKET_HANDLE sock) {
 }
 
 
-//set socket blocking
-static EASYSSL_BOOL set_socket_blocking(EASYSSL_SOCKET_HANDLE socket, EASYSSL_BOOL blocking) {
+//set socket blocking operation
+static EASYSSL_BOOL do_set_socket_blocking(EASYSSL_SOCKET_HANDLE socket, EASYSSL_BOOL blocking) {
 #ifdef _WIN32
     unsigned long mode = blocking ? 0 : 1;
     return (ioctlsocket(socket, FIONBIO, &mode) == 0) ? EASYSSL_TRUE : EASYSSL_FALSE;
@@ -368,6 +372,16 @@ static EASYSSL_BOOL set_socket_blocking(EASYSSL_SOCKET_HANDLE socket, EASYSSL_BO
     flags = blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
     return (fcntl(fd, F_SETFL, flags) == 0) ? EASYSSL_TRUE : EASYSSL_FALSE;
 #endif
+}
+
+
+//set socket blocking
+static EASYSSL_BOOL set_socket_blocking(EASYSSL_SOCKET_HANDLE socket, EASYSSL_BOOL blocking) {
+    if (!do_set_socket_blocking(socket, blocking)) {
+        handle_socket_error();
+        return EASYSSL_FALSE;
+    }
+    return EASYSSL_TRUE;
 }
 
 
@@ -640,6 +654,25 @@ static SSL_CTX* tcp_get_or_create_client_context(EASYSSL_SECURITY_DATA_STRUCT* s
 }
 
 
+//verify connection
+static EASYSSL_BOOL verify_connection(SSL* ssl) {
+    //if there is no certificate, fail
+    if (!SSL_get0_peer_certificate(ssl)) {
+        set_error(EASYSSL_ERROR_EASYSSL, EASYSSL_ERROR_NO_PEER_CERTIFICATE);
+        return EASYSSL_FALSE;
+    }
+
+    //if verification failed, fail
+    long lr = SSL_get_verify_result(ssl);
+    if (lr != X509_V_OK) {
+        set_error(EASYSSL_ERROR_OPENSSL, lr);
+        return EASYSSL_FALSE;
+    }
+
+    return EASYSSL_TRUE;
+}
+
+
 //////////////////////////////////////////////////
 //  TCP ACCEPT FUNCTIONS
 //////////////////////////////////////////////////
@@ -669,9 +702,7 @@ static void tcp_accept_failure_cleanup(EASYSSL_SOCKET sock) {
 
 //tcp ssl accept success
 static int tcp_accept_ssl_success(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr) {
-    //if there is no certificate, fail
-    if (!SSL_get0_peer_certificate(sock->ssl)) {
-        set_error(EASYSSL_ERROR_EASYSSL, EASYSSL_ERROR_NO_PEER_CERTIFICATE);
+    if (!verify_connection(sock->ssl)) {
         tcp_accept_failure_cleanup(sock);
         return EASYSSL_SOCKET_ERROR;
     }
@@ -866,18 +897,9 @@ static void tcp_connect_failure_cleanup(EASYSSL_SOCKET sock) {
 
 //ssl connect success
 static int tcp_connect_ssl_success(EASYSSL_SOCKET sock) {
-    //if there is no certificate, fail
-    if (!SSL_get0_peer_certificate(sock->ssl)) {
+    //verify connection
+    if (!verify_connection(sock->ssl)) {
         tcp_connect_failure_cleanup(sock);
-        set_error(EASYSSL_ERROR_EASYSSL, EASYSSL_ERROR_NO_PEER_CERTIFICATE);
-        return EASYSSL_SOCKET_ERROR;
-    }
-
-    //if verification failed, fail
-    long lr = SSL_get_verify_result(sock->ssl);
-    if (lr != X509_V_OK) {
-        tcp_connect_failure_cleanup(sock);
-        set_error(EASYSSL_ERROR_OPENSSL, lr);
         return EASYSSL_SOCKET_ERROR;
     }
 

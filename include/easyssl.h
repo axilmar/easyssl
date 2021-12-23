@@ -202,6 +202,36 @@ enum EASYSSL_ERROR_NUMBER {
 
 
 /**
+ * LOG level.
+ */
+enum EASYSSL_LOG_LEVEL {
+    EASYSSL_LOG_LEVEL_MIN = 0,
+
+    /**
+     * Log nothing (the default in release builds, via NDEBUG defined).
+     */
+    EASYSSL_LOG_LEVEL_NOTHING = EASYSSL_LOG_LEVEL_MIN,
+
+    /**
+     * Log information.
+     */
+    EASYSSL_LOG_LEVEL_INFORMATION,
+
+    /**
+     * Log information and warnings.
+     */
+     EASYSSL_LOG_LEVEL_WARNING,
+
+    /**
+     * Log information, warnings and errors (the default in debug builds, via NDEBUG being undefined).
+     */
+    EASYSSL_LOG_LEVEL_ERROR,
+
+    EASYSSL_LOG_LEVEL_MAX = EASYSSL_LOG_LEVEL_ERROR,
+};
+
+
+/**
  * Initializes the networking and SSL system.
  * @return true on success, false otherwise.
  */
@@ -394,6 +424,20 @@ const EASYSSL_ERROR* EASYSSL_get_last_error();
  * @return true on success, false on error.
  */
 EASYSSL_BOOL EASYSSL_get_error_string(const EASYSSL_ERROR* error, char* buffer, int buffer_size);
+
+
+/**
+ * Returns the log level.
+ */
+int EASYSSL_get_log_level();
+
+
+/**
+ * Sets the log level.
+ * @param level log level.
+ * @return true on success, false if the level is invalid.
+ */
+EASYSSL_BOOL EASYSSL_set_log_level(int level);
 
 
 #ifdef __cplusplus

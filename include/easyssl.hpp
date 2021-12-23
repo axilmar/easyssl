@@ -212,12 +212,25 @@ namespace easyssl {
 
         /**
          * Shuts down the socket.
+         * @return i/o result.
          * @exception easyssl::error thrown if there was an error.
          */
-        void shutdown() {
-            if (!EASYSSL_shutdown(m_socket.get())) {
-                throw error(*EASYSSL_get_last_error());
+        io_result shutdown() {
+            switch (EASYSSL_shutdown(m_socket.get())) {
+                case EASYSSL_SOCKET_CLOSED:
+                    return io_result::closed;
+
+                case EASYSSL_SOCKET_RETRY:
+                    return io_result::retry;
+
+                case EASYSSL_SOCKET_ERROR:
+                    throw error(*EASYSSL_get_last_error());
+
+                case EASYSSL_SOCKET_OK:
+                    return io_result::ok;
             }
+
+            throw std::logic_error("Unreachable code");
         }
 
         /**

@@ -27,7 +27,7 @@ namespace easyssl {
 
     private:
         static std::string get_error_string(const EASYSSL_ERROR& error) {
-            char buffer[65536];
+            char buffer[EASYSSL_ERROR_STRING_BUFFER_SIZE];
             EASYSSL_get_error_string(&error, buffer, sizeof(buffer));
             return buffer;
         }

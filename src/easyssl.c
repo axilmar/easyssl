@@ -4,6 +4,7 @@
 #include <openssl/rand.h>
 #include <openssl/engine.h>
 #include "easyssl.h"
+#include "loglib.h"
 
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -117,14 +118,6 @@ typedef struct COOKIE_VERIFY_CONTEXT {
 static thread_local EASYSSL_ERROR thread_error = { 0, 0 };
 
 
-//log level
-#ifdef NDEBUG
-static int log_level = EASYSSL_LOG_LEVEL_NOTHING;
-#else
-static int log_level = EASYSSL_LOG_LEVEL_ERROR;
-#endif
-
-
 //crypto locks
 static MUTEX* crypto_mutexes = NULL;
 
@@ -187,101 +180,6 @@ static int unlock_mutex(MUTEX* m) { pthread_mutex_unlock(m); }
 
 
 //////////////////////////////////////////////////
-//  DATETIME FUNCTIONS
-//////////////////////////////////////////////////
-
-
-#define DATETIME_BUFFER_SIZE 256
-
-
-//get datetime string
-static void get_datetime_str(char* buffer, int size) {
-    time_t timeval = time(NULL);
-    struct tm tms;
-    localtime_s(&tms , &timeval);
-    strftime(buffer, size, "%Y-%m-%e %H:%M:%S", &tms);
-}
-
-
-//////////////////////////////////////////////////
-//  LOGGING FUNCTIONS
-//////////////////////////////////////////////////
-
-
-#define LOG_BUFFER_SIZE 4096
-
-
-//get log level name
-static const char* get_log_level_name(int level) {
-    switch (level) {
-        case EASYSSL_LOG_LEVEL_INFORMATION: return "INFO ";
-        case EASYSSL_LOG_LEVEL_WARNING    : return "WARN ";
-        case EASYSSL_LOG_LEVEL_ERROR      : return "ERROR";
-    }
-    return "NONE ";
-}
-
-
-//generic log
-static void log_va_list(int level, const char* format, va_list args) {
-    if (level > log_level) {
-        return;
-    }
-
-    char datetime_buffer[DATETIME_BUFFER_SIZE];
-    get_datetime_str(datetime_buffer, DATETIME_BUFFER_SIZE);
-
-    //message buffer
-    char buffer[LOG_BUFFER_SIZE];
-    vsnprintf(buffer, sizeof(buffer), format, args);
-
-    //print message
-    if (level <= EASYSSL_LOG_LEVEL_WARNING) {
-        printf("[%s] %s : %s\n", datetime_buffer, get_log_level_name(level), buffer);
-    }
-    else {
-        fprintf(stderr, "[%s] %s : %s\n", datetime_buffer, get_log_level_name(level), buffer);
-    }
-}
-
-
-//log
-static void log(int level, const char* format, ...) {
-    va_list args;
-    va_start(args, format);
-    log_va_list(level, format, args);
-    va_end(args);
-}
-
-
-//log info
-static void log_info(const char* format, ...) {
-    va_list args;
-    va_start(args, format);
-    log_va_list(EASYSSL_LOG_LEVEL_INFORMATION, format, args);
-    va_end(args);
-}
-
-
-//log warning
-static void log_warn(const char* format, ...) {
-    va_list args;
-    va_start(args, format);
-    log_va_list(EASYSSL_LOG_LEVEL_WARNING, format, args);
-    va_end(args);
-}
-
-
-//log error
-static void log_error(const char* format, ...) {
-    va_list args;
-    va_start(args, format);
-    log_va_list(EASYSSL_LOG_LEVEL_ERROR, format, args);
-    va_end(args);
-}
-
-
-//////////////////////////////////////////////////
 //  ERROR FUNCTIONS
 //////////////////////////////////////////////////
 
@@ -290,11 +188,11 @@ static void log_error(const char* format, ...) {
 static void set_error(int category, int number) {
     thread_error.category = category;
     thread_error.number = number;
-    if (log_level > EASYSSL_LOG_LEVEL_NOTHING) {
-        char buffer[EASYSSL_ERROR_STRING_BUFFER_SIZE];
-        EASYSSL_get_error_string(&thread_error, buffer, sizeof(buffer));
-        log(EASYSSL_LOG_LEVEL_ERROR, buffer);
-    }
+    #ifndef EASYSSL_ERROR_LOGGING_DISABLED
+    char buffer[EASYSSL_ERROR_STRING_BUFFER_SIZE];
+    EASYSSL_get_error_string(&thread_error, buffer, sizeof(buffer));
+    LOGLIB_log_error(buffer);
+    #endif
 }
 
 
@@ -302,9 +200,11 @@ static void set_error(int category, int number) {
 static void set_error_va_list(int category, int number, const char* format, va_list args) {
     thread_error.category = category;
     thread_error.number = number;
-    if (log_level > EASYSSL_LOG_LEVEL_NOTHING) {
-        log_va_list(EASYSSL_LOG_LEVEL_ERROR, format, args);
-    }
+    #ifndef EASYSSL_ERROR_LOGGING_DISABLED
+    char buffer[EASYSSL_ERROR_STRING_BUFFER_SIZE];
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    LOGLIB_log_error(buffer);
+    #endif
 }
 
 
@@ -473,10 +373,23 @@ static void crypto_locking_callback(int mode, int type, const char* file, int li
 //////////////////////////////////////////////////
 
 
-//handle shutdown result
-static int handle_shutdown_result(EASYSSL_SOCKET socket, int r) {
+//handle shutdown result from SSL_shutdown
+static int handle_shutdown_result_SSL_shutdown(EASYSSL_SOCKET socket, int r) {
+    //success
+    if (r == 1) {
+        return EASYSSL_SOCKET_OK;
+    }
+
+    //retry
+    if (r == 0) {
+        socket->retry_mode = SOCKET_RETRY_SSL;
+        return EASYSSL_SOCKET_RETRY;
+    }
+
+    //error
     switch (SSL_get_error(socket->ssl, r)) {
         case SSL_ERROR_NONE:
+            socket->retry_mode = SOCKET_RETRY_NONE;
             return EASYSSL_SOCKET_OK;
 
         case SSL_ERROR_ZERO_RETURN:
@@ -505,7 +418,61 @@ static int handle_shutdown_result(EASYSSL_SOCKET socket, int r) {
             return EASYSSL_SOCKET_ERROR;
     }
 
-    set_einval("Unknown error returned by SSL_get_error in function handle_shutdown_result.");
+    set_einval("Unknown error returned by SSL_get_error in function handle_shutdown_result_SSL_shutdown.");
+    return EASYSSL_SOCKET_ERROR;
+
+}
+
+
+//handle shutdown result from SSL_read
+static int handle_shutdown_result_SSL_read(EASYSSL_SOCKET socket, int r) {
+    switch (SSL_get_error(socket->ssl, r)) {
+        case SSL_ERROR_NONE:
+            socket->retry_mode = SOCKET_RETRY_NONE;
+            return EASYSSL_SOCKET_OK;
+
+        case SSL_ERROR_ZERO_RETURN:
+            socket->retry_mode = SOCKET_RETRY_NONE;
+            return EASYSSL_SOCKET_CLOSED;
+
+        case SSL_ERROR_WANT_READ:
+        case SSL_ERROR_WANT_WRITE:
+        case SSL_ERROR_WANT_CONNECT:
+        case SSL_ERROR_WANT_ACCEPT:
+        case SSL_ERROR_WANT_X509_LOOKUP:
+        case SSL_ERROR_WANT_ASYNC:
+        case SSL_ERROR_WANT_ASYNC_JOB:
+        case SSL_ERROR_WANT_CLIENT_HELLO_CB:
+            socket->retry_mode = SOCKET_RETRY_SSL;
+            return EASYSSL_SOCKET_RETRY;
+
+        case SSL_ERROR_SYSCALL:
+            socket->retry_mode = SOCKET_RETRY_NONE;
+            handle_syscall_error();
+            return EASYSSL_SOCKET_ERROR;
+
+        case SSL_ERROR_SSL:
+            socket->retry_mode = SOCKET_RETRY_NONE;
+            set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+            return EASYSSL_SOCKET_ERROR;
+    }
+
+    set_einval("Unknown error returned by SSL_get_error in function handle_shutdown_result_SSL_read.");
+    return EASYSSL_SOCKET_ERROR;
+}
+
+
+//handle shutdown result
+static int handle_shutdown_result(EASYSSL_SOCKET socket, int r) {
+    switch (socket->retry_mode) {
+        case SOCKET_RETRY_NONE:
+            return handle_shutdown_result_SSL_shutdown(socket, r);
+
+        case SOCKET_RETRY_SSL:
+            return handle_shutdown_result_SSL_read(socket, r);
+    }
+
+    set_einval("Invalid socket retry mode in function handle_shutdown_result.");
     return EASYSSL_SOCKET_ERROR;
 }
 
@@ -1230,6 +1197,9 @@ EASYSSL_BOOL EASYSSL_init() {
     }
     CRYPTO_set_locking_callback(crypto_locking_callback);
 
+    //init logging
+    LOGLIB_init();
+
     return EASYSSL_TRUE;
 }
 
@@ -1258,6 +1228,9 @@ EASYSSL_BOOL EASYSSL_cleanup() {
         return EASYSSL_FALSE;
     }
     #endif
+
+    //cleanup logging
+    LOGLIB_cleanup();
 
     return EASYSSL_TRUE;
 }
@@ -1461,7 +1434,13 @@ EASYSSL_BOOL EASYSSL_close(EASYSSL_SOCKET socket) {
         set_socket_blocking(socket->handle, EASYSSL_TRUE);
 
         //shutdown the socket
-        EASYSSL_shutdown(socket);
+        while (EASYSSL_shutdown(socket) == EASYSSL_SOCKET_RETRY) {
+            #ifdef _WIN32
+            Sleep(10);
+            #else
+            pthread_yield();
+            #endif
+        }
 
         //free its ssl part, if set
         SSL_free(socket->ssl);
@@ -1756,6 +1735,8 @@ const EASYSSL_ERROR* EASYSSL_get_last_error() {
 
 //Retrieves the string that corresponds to the given error.
 EASYSSL_BOOL EASYSSL_get_error_string(const EASYSSL_ERROR* error, char* buffer, int buffer_size) {
+    buffer[0] = '\0';
+
     //check params
     if (!error) {
         set_einval("Null error in function EASYSSL_get_error_string.");
@@ -1779,12 +1760,13 @@ EASYSSL_BOOL EASYSSL_get_error_string(const EASYSSL_ERROR* error, char* buffer, 
             #endif
 
         #ifdef _WIN32
-        case EASYSSL_ERROR_WINSOCK:
-            return FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, error->number, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buffer, buffer_size, NULL) > 0;
+        case EASYSSL_ERROR_WINSOCK: {
+            EASYSSL_BOOL ok = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, error->number, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buffer, buffer_size, NULL) > 0;
+            return ok;
+        }
         #endif
 
         case EASYSSL_ERROR_OPENSSL:
-            buffer[0] = '\0';
             ERR_error_string_n(error->number, buffer, buffer_size);
             return buffer[0] != '\0';
 
@@ -1805,21 +1787,3 @@ EASYSSL_BOOL EASYSSL_get_error_string(const EASYSSL_ERROR* error, char* buffer, 
     set_einval("Invalid error in function EASYSSL_get_error_string.");
     return EASYSSL_FALSE;
 }
-
-
-//returns the log level
-int EASYSSL_get_log_level() {
-    return log_level;
-}
-
-
-//Sets the log level.
-EASYSSL_BOOL EASYSSL_set_log_level(int level) {
-    if (level < EASYSSL_LOG_LEVEL_MIN || level > EASYSSL_LOG_LEVEL_MAX) {
-        return EASYSSL_FALSE;
-    }
-    log_level = level;
-    return EASYSSL_TRUE;
-}
-
-

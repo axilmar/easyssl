@@ -373,62 +373,18 @@ static void crypto_locking_callback(int mode, int type, const char* file, int li
 //////////////////////////////////////////////////
 
 
-//handle shutdown result from SSL_shutdown
-static int handle_shutdown_result_SSL_shutdown(EASYSSL_SOCKET socket, int r) {
-    //success
-    if (r == 1) {
-        return EASYSSL_SOCKET_OK;
-    }
+//shutdown ssl
+static int shutdown_ssl(EASYSSL_SOCKET socket) {
+    char buf[1];
 
-    //retry
-    if (r == 0) {
-        socket->retry_mode = SOCKET_RETRY_SSL;
-        return EASYSSL_SOCKET_RETRY;
-    }
+    //read
+    int r = SSL_read(socket->ssl, buf, sizeof(buf));
 
-    //error
+    //handle shutdown result
     switch (SSL_get_error(socket->ssl, r)) {
         case SSL_ERROR_NONE:
             socket->retry_mode = SOCKET_RETRY_NONE;
-            return EASYSSL_SOCKET_OK;
-
-        case SSL_ERROR_ZERO_RETURN:
-            socket->retry_mode = SOCKET_RETRY_NONE;
-            return EASYSSL_SOCKET_CLOSED;
-
-        case SSL_ERROR_WANT_READ:
-        case SSL_ERROR_WANT_WRITE:
-        case SSL_ERROR_WANT_CONNECT:
-        case SSL_ERROR_WANT_ACCEPT:
-        case SSL_ERROR_WANT_X509_LOOKUP:
-        case SSL_ERROR_WANT_ASYNC:
-        case SSL_ERROR_WANT_ASYNC_JOB:
-        case SSL_ERROR_WANT_CLIENT_HELLO_CB:
-            socket->retry_mode = SOCKET_RETRY_SSL;
-            return EASYSSL_SOCKET_RETRY;
-
-        case SSL_ERROR_SYSCALL:
-            socket->retry_mode = SOCKET_RETRY_NONE;
-            handle_syscall_error();
-            return EASYSSL_SOCKET_ERROR;
-
-        case SSL_ERROR_SSL:
-            socket->retry_mode = SOCKET_RETRY_NONE;
-            set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
-            return EASYSSL_SOCKET_ERROR;
-    }
-
-    set_einval("Unknown error returned by SSL_get_error in function handle_shutdown_result_SSL_shutdown.");
-    return EASYSSL_SOCKET_ERROR;
-
-}
-
-
-//handle shutdown result from SSL_read
-static int handle_shutdown_result_SSL_read(EASYSSL_SOCKET socket, int r) {
-    switch (SSL_get_error(socket->ssl, r)) {
-        case SSL_ERROR_NONE:
-            socket->retry_mode = SOCKET_RETRY_NONE;
+            SSL_clear(socket->ssl);
             return EASYSSL_SOCKET_OK;
 
         case SSL_ERROR_ZERO_RETURN:
@@ -462,21 +418,6 @@ static int handle_shutdown_result_SSL_read(EASYSSL_SOCKET socket, int r) {
 }
 
 
-//handle shutdown result
-static int handle_shutdown_result(EASYSSL_SOCKET socket, int r) {
-    switch (socket->retry_mode) {
-        case SOCKET_RETRY_NONE:
-            return handle_shutdown_result_SSL_shutdown(socket, r);
-
-        case SOCKET_RETRY_SSL:
-            return handle_shutdown_result_SSL_read(socket, r);
-    }
-
-    set_einval("Invalid socket retry mode in function handle_shutdown_result.");
-    return EASYSSL_SOCKET_ERROR;
-}
-
-
 //shutdown init
 static int shutdown_init(EASYSSL_SOCKET socket) {
     //clear errors, in order to later find out which error mechanism was used
@@ -485,20 +426,53 @@ static int shutdown_init(EASYSSL_SOCKET socket) {
     //shutdown
     int r = SSL_shutdown(socket->ssl);
 
-    //handle shutdown result
-    return handle_shutdown_result(socket, r);
-}
+    //success
+    if (r == 1) {
+        SSL_clear(socket->ssl);
+        return EASYSSL_SOCKET_OK;
+    }
 
+    //retry
+    if (r == 0) {
+        socket->retry_mode = SOCKET_RETRY_SSL;
+        return shutdown_ssl(socket);
+    }
 
-//shutdown ssl
-static int shutdown_ssl(EASYSSL_SOCKET socket) {
-    char buf[1];
+    //error
+    switch (SSL_get_error(socket->ssl, r)) {
+        case SSL_ERROR_NONE:
+            socket->retry_mode = SOCKET_RETRY_NONE;
+            SSL_clear(socket->ssl);
+            return EASYSSL_SOCKET_OK;
 
-    //read
-    int r = SSL_read(socket->ssl, buf, sizeof(buf));
+        case SSL_ERROR_ZERO_RETURN:
+            socket->retry_mode = SOCKET_RETRY_NONE;
+            return EASYSSL_SOCKET_CLOSED;
 
-    //handle shutdown result
-    return handle_shutdown_result(socket, r);
+        case SSL_ERROR_WANT_READ:
+        case SSL_ERROR_WANT_WRITE:
+        case SSL_ERROR_WANT_CONNECT:
+        case SSL_ERROR_WANT_ACCEPT:
+        case SSL_ERROR_WANT_X509_LOOKUP:
+        case SSL_ERROR_WANT_ASYNC:
+        case SSL_ERROR_WANT_ASYNC_JOB:
+        case SSL_ERROR_WANT_CLIENT_HELLO_CB:
+            socket->retry_mode = SOCKET_RETRY_SSL;
+            return EASYSSL_SOCKET_RETRY;
+
+        case SSL_ERROR_SYSCALL:
+            socket->retry_mode = SOCKET_RETRY_NONE;
+            handle_syscall_error();
+            return EASYSSL_SOCKET_ERROR;
+
+        case SSL_ERROR_SSL:
+            socket->retry_mode = SOCKET_RETRY_NONE;
+            set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+            return EASYSSL_SOCKET_ERROR;
+    }
+
+    set_einval("Unknown error returned by SSL_get_error in function handle_shutdown_result_SSL_shutdown.");
+    return EASYSSL_SOCKET_ERROR;
 }
 
 
@@ -1401,11 +1375,6 @@ int EASYSSL_shutdown(EASYSSL_SOCKET socket) {
         return EASYSSL_SOCKET_OK;
     }
 
-    //if already shutdown
-    if (SSL_get_shutdown(socket->ssl)) {
-        return EASYSSL_SOCKET_OK;
-    }
-
     //handle retry mode
     switch (socket->retry_mode) {
         case SOCKET_RETRY_NONE:
@@ -1433,7 +1402,7 @@ EASYSSL_BOOL EASYSSL_close(EASYSSL_SOCKET socket) {
         //shutdown the socket; wait for shutdown
         while (EASYSSL_shutdown(socket) == EASYSSL_SOCKET_RETRY) {
             #ifdef _WIN32
-            Sleep(10);
+            Sleep(0);
             #else
             pthread_yield();
             #endif

@@ -3,7 +3,7 @@
 #include <openssl/err.h>
 #include <openssl/rand.h>
 #include <openssl/engine.h>
-#include "easyssl.h"
+#include "easyssl/easyssl_impl.h"
 #include "loglib.h"
 
 
@@ -1430,10 +1430,7 @@ EASYSSL_BOOL EASYSSL_close(EASYSSL_SOCKET socket) {
 
     //if ssl exists in the socket
     if (socket->ssl) {
-        //make the socket blocking so as that we don't have to do a shutdown loop
-        set_socket_blocking(socket->handle, EASYSSL_TRUE);
-
-        //shutdown the socket
+        //shutdown the socket; wait for shutdown
         while (EASYSSL_shutdown(socket) == EASYSSL_SOCKET_RETRY) {
             #ifdef _WIN32
             Sleep(10);

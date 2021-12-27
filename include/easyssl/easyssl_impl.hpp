@@ -159,8 +159,11 @@ namespace easyssl {
             ///retry.
             retry = EASYSSL_SOCKET_RETRY,
 
+            //connection refused
+            connection_refused = EASYSSL_SOCKET_ERROR,
+
             ///success.
-            ok = EASYSSL_SOCKET_OK
+            success = EASYSSL_SOCKET_SUCCESS,
         };
 
         /**

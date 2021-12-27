@@ -175,8 +175,8 @@ namespace easyssl {
                 case EASYSSL_SOCKET_ERROR:
                     throw error(*EASYSSL_get_last_error());
 
-                case EASYSSL_SOCKET_OK:
-                    return io_result::ok;
+                case EASYSSL_SOCKET_SUCCESS:
+                    return io_result::success;
             }
 
             throw std::logic_error("Unreachable code");
@@ -214,10 +214,10 @@ namespace easyssl {
             case EASYSSL_SOCKET_ERROR:
                 throw error(*EASYSSL_get_last_error());
 
-            case EASYSSL_SOCKET_OK:
+            case EASYSSL_SOCKET_SUCCESS:
                 new_socket.m_security_data = m_security_data;
                 new_socket.m_socket = std::shared_ptr<EASYSSL_SOCKET_STRUCT>{ s, EASYSSL_close };
-                return io_result::ok;
+                return io_result::success;
         }
 
         throw std::logic_error("Unreachable code");
@@ -233,11 +233,14 @@ namespace easyssl {
             case EASYSSL_SOCKET_RETRY:
                 return io_result::retry;
 
+            case EASYSSL_SOCKET_CONNECTION_REFUSED:
+                return io_result::connection_refused;
+
             case EASYSSL_SOCKET_ERROR:
                 throw error(*EASYSSL_get_last_error());
 
-            case EASYSSL_SOCKET_OK:
-                return io_result::ok;
+            case EASYSSL_SOCKET_SUCCESS:
+                return io_result::success;
         }
 
         throw std::logic_error("Unreachable code");

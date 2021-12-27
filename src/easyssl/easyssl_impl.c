@@ -566,6 +566,7 @@ static int verify_cookie(SSL* ssl, const unsigned char* cookie, size_t cookie_le
 static void delete_cookie_verify_context(SSL* ssl) {
     void* cookie_verify_data = SSL_get_app_data(ssl);
     free(cookie_verify_data);
+    SSL_set_app_data(ssl, NULL);
 }
 
 
@@ -761,18 +762,15 @@ static EASYSSL_BOOL verify_connection(SSL* ssl) {
 
 //failure cleanup for tcp accept
 static void tcp_accept_failure_cleanup(EASYSSL_SOCKET sock) {
-    //cleanup the ssl
-    if (sock->ssl) {
-        //also free cookie verify data
-        delete_cookie_verify_context(sock->ssl);
+    //free cookie verify data
+    delete_cookie_verify_context(sock->ssl);
 
-        //also close the socket
-        EASYSSL_SOCKET_HANDLE handle = SSL_get_fd(sock->ssl);
-        close_socket(handle);
+    //close the client socket
+    EASYSSL_SOCKET_HANDLE handle = SSL_get_fd(sock->ssl);
+    close_socket(handle);
 
-        //free the ssl
-        SSL_free(sock->ssl);
-    }
+    //free the ssl
+    SSL_free(sock->ssl);
 
     //cleanup the socket
     sock->retry_mode = SOCKET_RETRY_NONE;
@@ -783,16 +781,9 @@ static void tcp_accept_failure_cleanup(EASYSSL_SOCKET sock) {
 
 //tcp ssl accept success
 static int tcp_accept_ssl_success(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr) {
+    //if verification failed
     if (!verify_connection(sock->ssl)) {
         tcp_accept_failure_cleanup(sock);
-        return EASYSSL_SOCKET_ERROR;
-    }
-
-    //if verification failed, fail
-    long lr = SSL_get_verify_result(sock->ssl);
-    if (lr != X509_V_OK) {
-        tcp_accept_failure_cleanup(sock);
-        set_error(EASYSSL_ERROR_OPENSSL, lr);
         return EASYSSL_SOCKET_ERROR;
     }
 
@@ -823,7 +814,6 @@ static int tcp_accept_ssl_success(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socke
 
     //cleanup the listening socket for the next accept call
     delete_cookie_verify_context(sock->ssl);
-    SSL_set_app_data(sock->ssl, NULL);
     sock->ssl = NULL;
     sock->retry_mode = SOCKET_RETRY_NONE;
 
@@ -841,8 +831,8 @@ static int tcp_accept_ssl(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYS
             return tcp_accept_ssl_success(sock, new_socket, addr);
 
         case SSL_ERROR_ZERO_RETURN:
-            set_error(EASYSSL_ERROR_OPENSSL, SSL_ERROR_ZERO_RETURN);
             tcp_accept_failure_cleanup(sock);
+            set_error(EASYSSL_ERROR_OPENSSL, SSL_ERROR_ZERO_RETURN);
             return EASYSSL_SOCKET_CLOSED;
 
         case SSL_ERROR_WANT_READ:
@@ -857,16 +847,17 @@ static int tcp_accept_ssl(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYS
             return EASYSSL_SOCKET_RETRY;
 
         case SSL_ERROR_SYSCALL:
-            handle_syscall_error();
             tcp_accept_failure_cleanup(sock);
+            handle_syscall_error();
             return EASYSSL_SOCKET_ERROR;
 
         case SSL_ERROR_SSL:
-            set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
             tcp_accept_failure_cleanup(sock);
+            set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
             return EASYSSL_SOCKET_ERROR;
     }
 
+    tcp_accept_failure_cleanup(sock);
     set_einval("Unknown error returned by SSL_get_error in function tcp_accept_ssl.");
     return EASYSSL_SOCKET_ERROR;
 }

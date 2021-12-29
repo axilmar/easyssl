@@ -571,6 +571,35 @@ static void delete_cookie_verify_context(SSL* ssl) {
 
 
 //////////////////////////////////////////////////
+//  SSL FUNCTIONS
+//////////////////////////////////////////////////
+
+
+//restores the tcp no delay option
+static void restore_tcp_no_delay(SSL* ssl) {
+    EASYSSL_SOCKET_HANDLE handle = (EASYSSL_SOCKET_HANDLE)SSL_get_fd(ssl);
+    char on = (char)SSL_get_ex_data(ssl, 1);
+    setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+}
+
+
+//sets the tcp no delay option
+static void set_tcp_no_delay(SSL* ssl) {
+    EASYSSL_SOCKET_HANDLE handle = (EASYSSL_SOCKET_HANDLE)SSL_get_fd(ssl);
+
+    //save the tcp no delay option to restore it later
+    char opt;
+    int len = sizeof(opt);
+    getsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &opt, &len);
+    SSL_set_ex_data(ssl, 1, (void*)opt);
+
+    //set the tcp no delay to on
+    char on = 1;
+    setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+}
+
+
+//////////////////////////////////////////////////
 //  SSL CONTEXT FUNCTIONS
 //////////////////////////////////////////////////
 
@@ -695,11 +724,7 @@ static SSL_CTX* handle_context_creation(EASYSSL_SECURITY_DATA_STRUCT* sd, SSL_CT
 //handshake finished callback
 static void ssl_handshake_finished(const SSL* ssl, int where, int ret) {
     if (where & SSL_CB_HANDSHAKE_DONE) {
-        //restore the socket's tcp no delay value
-        char off = 0;
-        setsockopt((EASYSSL_SOCKET_HANDLE)SSL_get_fd(ssl), IPPROTO_TCP, TCP_NODELAY, &off, sizeof(off));
-
-        //delete the cookie verify context
+        restore_tcp_no_delay((SSL*)ssl);
         delete_cookie_verify_context((SSL*)ssl);
     }
 }
@@ -845,8 +870,7 @@ static int tcp_accept_socket(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EA
     }
 
     //turn Nagle's algorithm off for the handshake in order to allow ACK to be returned as soon as possible
-    char on = 1;
-    setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+    set_tcp_no_delay(ssl);
 
     //set the socket in accept state (for ssl)
     SSL_set_accept_state(ssl);
@@ -915,8 +939,7 @@ static void tcp_connect_failure_cleanup(EASYSSL_SOCKET sock) {
 //ssl connect success
 static int tcp_connect_ssl_success(EASYSSL_SOCKET sock) {
     //success; restore the no delay parameter
-    char tcp_nodelay = (char)SSL_get_app_data(sock->ssl);
-    setsockopt(sock->handle, IPPROTO_TCP, TCP_NODELAY, &tcp_nodelay, sizeof(tcp_nodelay));
+    restore_tcp_no_delay(sock->ssl);
 
     //cleanup the socket
     sock->retry_mode = SOCKET_RETRY_NONE;
@@ -983,18 +1006,11 @@ static int tcp_connect_socket_success(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_
     //set the socket handle
     SSL_set_fd(ssl, (int)sock->handle);
 
-    //keep the current no delay option of the socket
-    char tcp_nodelay;
-    int optlen = sizeof(tcp_nodelay);
-    getsockopt(sock->handle, IPPROTO_TCP, TCP_NODELAY, &tcp_nodelay, &optlen);
-    SSL_set_app_data(ssl, tcp_nodelay);
-
-    //turn Nagle's algorithm off for the handshake in order to allow ACK to be returned as soon as possible
-    char on = 1;
-    setsockopt(sock->handle, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
-
     //store the ssl in the socket 
     sock->ssl = ssl;
+
+    //turn Nagle's algorithm off for the handshake in order to allow ACK to be returned as soon as possible
+    set_tcp_no_delay(ssl);
 
     //continue with ssl connect
     return tcp_connect_ssl(sock, addr);
@@ -1628,10 +1644,17 @@ EASYSSL_BOOL EASYSSL_getsockopt(EASYSSL_SOCKET socket, int level, int name, void
         return EASYSSL_FALSE;
     }
 
-    //get option
-    if (getsockopt(socket->handle, level, name, opt, &len)) {
-        handle_socket_error();
-        return EASYSSL_FALSE;
+    //normal option or tcp no delay after the handshake
+    if (level != IPPROTO_TCP || level != TCP_NODELAY || !socket->ssl || SSL_get_state(socket->ssl) == TLS_ST_OK) {
+        if (getsockopt(socket->handle, level, name, opt, &len)) {
+            handle_socket_error();
+            return EASYSSL_FALSE;
+        }
+    }
+
+    //else during the handshake
+    else {
+        *(char*)opt = (char)SSL_get_ex_data(socket->ssl, 1);
     }
 
     //success
@@ -1648,10 +1671,17 @@ EASYSSL_BOOL EASYSSL_setsockopt(EASYSSL_SOCKET socket, int level, int name, cons
         return EASYSSL_FALSE;
     }
 
-    //get option
-    if (setsockopt(socket->handle, level, name, opt, len)) {
-        handle_socket_error();
-        return EASYSSL_FALSE;
+    //normal option or tcp no delay after the handshake
+    if (level != IPPROTO_TCP || level != TCP_NODELAY || !socket->ssl || SSL_get_state(socket->ssl) == TLS_ST_OK) {
+        if (setsockopt(socket->handle, level, name, opt, len)) {
+            handle_socket_error();
+            return EASYSSL_FALSE;
+        }
+    }
+
+    //otherwise, during the handshake, store the option for later processing
+    else {
+        SSL_set_ex_data(socket->ssl, 1, (void*)*(char*)opt);
     }
 
     //success

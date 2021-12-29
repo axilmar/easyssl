@@ -764,49 +764,34 @@ static void tcp_accept_failure_cleanup(EASYSSL_SOCKET sock) {
 
 
 //tcp ssl accept success
-static int tcp_accept_ssl_success(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr) {
-    //allocate memory for new socket
-    EASYSSL_SOCKET_STRUCT* new_sock = (EASYSSL_SOCKET_STRUCT*)malloc(sizeof(EASYSSL_SOCKET_STRUCT));
-
-    //if failed to create a socket
-    if (!new_sock) {
-        tcp_accept_failure_cleanup(sock);
-        set_error(EASYSSL_ERROR_SYSTEM, errno);
-        return EASYSSL_SOCKET_ERROR;
-    }
-
-    //setup the new socket
-    new_sock->handle = SSL_get_fd(sock->ssl);
-    new_sock->security_data = sock->security_data;
-    new_sock->ssl = sock->ssl;
-    new_sock->type_stream = sock->type_stream;
-    new_sock->retry_mode = SOCKET_RETRY_NONE;
-    new_sock->blocking = sock->blocking;
-
-    //return the new socket
-    *new_socket = new_sock;
-
+static int tcp_accept_ssl_success(EASYSSL_SOCKET sock) {
     //restore the socket's tcp no delay value
     char off = 0;
-    setsockopt(new_sock->handle, IPPROTO_TCP, TCP_NODELAY, &off, sizeof(off));
+    setsockopt(sock->handle, IPPROTO_TCP, TCP_NODELAY, &off, sizeof(off));
 
-    //cleanup the listening socket for the next accept call
+    //cleanup the socket
     delete_cookie_verify_context(sock->ssl);
-    sock->ssl = NULL;
     sock->retry_mode = SOCKET_RETRY_NONE;
 
-    //finally, a secure socket for the client is created on the server side
+    //finally, a secure socket for the client is created on the server side, with completed handshake
     return EASYSSL_SOCKET_SUCCESS;
 }
 
 
 //tcp ssl accept
-static int tcp_accept_ssl(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr) {
+static int tcp_accept_ssl(EASYSSL_SOCKET sock) {
+    //the socket must be in SSL retry mode
+    if (sock->retry_mode != SOCKET_RETRY_SSL) {
+        return EASYSSL_SOCKET_SUCCESS;
+    }
+
+    //accept
     int r = SSL_accept(sock->ssl);
 
+    //handle accept result
     switch (SSL_get_error(sock->ssl, r)) {
         case SSL_ERROR_NONE:
-            return tcp_accept_ssl_success(sock, new_socket, addr);
+            return tcp_accept_ssl_success(sock);
 
         case SSL_ERROR_ZERO_RETURN:
             tcp_accept_failure_cleanup(sock);
@@ -821,7 +806,6 @@ static int tcp_accept_ssl(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYS
         case SSL_ERROR_WANT_ASYNC:
         case SSL_ERROR_WANT_ASYNC_JOB:
         case SSL_ERROR_WANT_CLIENT_HELLO_CB:
-            sock->retry_mode = SOCKET_RETRY_SSL;
             return EASYSSL_SOCKET_RETRY;
 
         case SSL_ERROR_SYSCALL:
@@ -851,12 +835,10 @@ static int tcp_accept_socket(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EA
     if (handle == -1) {
         //if error is wait, then retry
         if (socket_error_is_wait()) {
-            sock->retry_mode = SOCKET_RETRY_SYSCALL;
             return EASYSSL_SOCKET_RETRY;
         }
 
         //otherwise, error
-        sock->retry_mode = SOCKET_RETRY_NONE;
         handle_socket_error();
         return EASYSSL_SOCKET_ERROR;
     }
@@ -864,7 +846,6 @@ static int tcp_accept_socket(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EA
     //if the parent socket is non-blocking, set the child socket to non-blocking to
     if (!sock->blocking && !set_socket_blocking(handle, EASYSSL_FALSE)) {
         close_socket(handle);
-        sock->retry_mode = SOCKET_RETRY_NONE;
         return EASYSSL_SOCKET_ERROR;
     }
 
@@ -874,7 +855,6 @@ static int tcp_accept_socket(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EA
     //if failed to create the ssl
     if (!ssl) {
         close_socket(handle);
-        sock->retry_mode = SOCKET_RETRY_NONE;
         set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
         return EASYSSL_SOCKET_ERROR;
     }
@@ -882,12 +862,31 @@ static int tcp_accept_socket(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EA
     //set the socket handle
     SSL_set_fd(ssl, (int)handle);
 
-    //in order to find the ssl in the next retry, set the socket's ssl to the new ssl
-    sock->ssl = ssl;
+    //allocate memory for new socket
+    EASYSSL_SOCKET_STRUCT* new_sock = (EASYSSL_SOCKET_STRUCT*)malloc(sizeof(EASYSSL_SOCKET_STRUCT));
 
-    //init cookie verify context
+    //if failed to create a socket
+    if (!new_sock) {
+        close_socket(handle);
+        SSL_free(ssl);
+        set_error(EASYSSL_ERROR_SYSTEM, errno);
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //setup the new socket
+    new_sock->handle = handle;
+    new_sock->security_data = sock->security_data;
+    new_sock->ssl = ssl;
+    new_sock->type_stream = EASYSSL_TRUE;
+    new_sock->retry_mode = SOCKET_RETRY_SSL;
+    new_sock->blocking = sock->blocking;
+
+    //return the new socket
+    *new_socket = new_sock;
+
+    //init cookie verify context on the new socket
     if (!init_cookie_verify_context(ssl)) {
-        tcp_accept_failure_cleanup(sock);
+        tcp_accept_failure_cleanup(new_sock);
         return EASYSSL_SOCKET_ERROR;
     }
 
@@ -895,8 +894,8 @@ static int tcp_accept_socket(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EA
     char on = 1;
     setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 
-    //continue with ssl accept
-    return tcp_accept_ssl(sock, new_socket, addr);
+    //success; a secure socket (that hasn't done the handshake yet) for the client is created on the server side
+    return EASYSSL_SOCKET_SUCCESS;
 }
 
 
@@ -918,6 +917,10 @@ static int tcp_accept_init(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASY
         return EASYSSL_SOCKET_ERROR;
     }
 
+    //since this socket is for accepting connections,
+    //its state is permanently SOCKET_RETRY_SYSCALL
+    sock->retry_mode = SOCKET_RETRY_SYSCALL;
+
     //continue with socket accept
     return tcp_accept_socket(sock, new_socket, addr);
 }
@@ -931,9 +934,6 @@ static int tcp_accept(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_S
 
         case SOCKET_RETRY_SYSCALL:
             return tcp_accept_socket(sock, new_socket, addr);
-
-        case SOCKET_RETRY_SSL:
-            return tcp_accept_ssl(sock, new_socket, addr);
     }
 
     //invalid retry mode
@@ -1183,6 +1183,20 @@ static int udp_accept(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_S
 static EASYSSL_BOOL udp_connect(EASYSSL_SOCKET socket, const EASYSSL_SOCKET_ADDRESS* addr) {
     //TODO
     return EASYSSL_TRUE;
+}
+
+
+//////////////////////////////////////////////////
+//  TCP/UDP SOCKET FUNCTIONS
+//////////////////////////////////////////////////
+
+
+//handles accept state
+static int socket_accept_ssl(EASYSSL_SOCKET_STRUCT* sock) {
+    if (sock->type_stream) {
+        return tcp_accept_ssl(sock);
+    }
+    return EASYSSL_SOCKET_SUCCESS;
 }
 
 
@@ -1552,8 +1566,6 @@ int EASYSSL_connect(EASYSSL_SOCKET socket, const EASYSSL_SOCKET_ADDRESS* addr) {
 
 //send data
 int EASYSSL_send(EASYSSL_SOCKET socket, const void* buffer, int buffer_size) {
-    int r;
-
     //check params
     if (!socket) {
         set_einval("Null socket in function EASYSSL_send.");
@@ -1566,6 +1578,12 @@ int EASYSSL_send(EASYSSL_SOCKET socket, const void* buffer, int buffer_size) {
     if (buffer_size <= 0) {
         set_einval("Zero or negative buffer size in function EASYSSL_send.");
         return EASYSSL_SOCKET_ERROR;
+    }
+
+    //if socket is in accept mode, handle hanshake
+    int r = socket_accept_ssl(socket);
+    if (r != EASYSSL_SOCKET_SUCCESS) {
+        return r;
     }
 
     //write data
@@ -1607,8 +1625,6 @@ int EASYSSL_send(EASYSSL_SOCKET socket, const void* buffer, int buffer_size) {
 
 //receive data
 int EASYSSL_recv(EASYSSL_SOCKET socket, void* buffer, int buffer_size) {
-    int r;
-
     //check param
     if (!socket) {
         set_einval("Null socket in function EASYSSL_recv.");
@@ -1621,6 +1637,12 @@ int EASYSSL_recv(EASYSSL_SOCKET socket, void* buffer, int buffer_size) {
     if (buffer_size <= 0) {
         set_einval("Zero or negative buffer size in function EASYSSL_recv.");
         return EASYSSL_SOCKET_ERROR;
+    }
+
+    //if socket is in accept mode, handle hanshake
+    int r = socket_accept_ssl(socket);
+    if (r != EASYSSL_SOCKET_SUCCESS) {
+        return r;
     }
 
     //read data
@@ -1777,7 +1799,15 @@ EASYSSL_BOOL EASYSSL_get_error_string(const EASYSSL_ERROR* error, char* buffer, 
 
         #ifdef _WIN32
         case EASYSSL_ERROR_WINSOCK: {
+            //format message
             EASYSSL_BOOL success = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, error->number, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buffer, buffer_size, NULL) > 0;
+            
+            //remove trailing newlines
+            if (success) {
+                size_t len = strlen(buffer);
+                buffer[len - 2] = '\0';
+            }
+
             return success;
         }
         #endif

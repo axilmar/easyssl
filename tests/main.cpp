@@ -194,13 +194,14 @@ static void test_tcp_one_server_one_client_non_blocking() {
                 std::string str;
                 str.resize(test_message.size());
                 for (size_t i = 0; i < test_message_count; ++i) {
+                    RECEIVE:
                     switch (client_socket.receive(str.data(), (int)str.size())) {
                         case socket::io_result::closed:
                             throw std::runtime_error("server client socket closed");
 
                         case socket::io_result::retry:
                             std::this_thread::yield();
-                            break;
+                            goto RECEIVE;
 
                         default:
                             check(str == test_message);
@@ -307,13 +308,14 @@ static void test_tcp_one_server_many_clients_non_blocking() {
                             std::string str;
                             str.resize(test_message.size());
                             for (size_t i = 0; i < test_message_count; ++i) {
+                                RECEIVE:
                                 switch (client_socket.receive(str.data(), (int)str.size())) {
                                     case socket::io_result::closed:
                                         throw std::runtime_error("server client socket closed");
 
                                     case socket::io_result::retry:
                                         std::this_thread::yield();
-                                        break;
+                                        goto RECEIVE;
 
                                     default:
                                         check(str == test_message);
@@ -387,9 +389,9 @@ static void test_tcp_one_server_many_clients_non_blocking() {
 int main() {
     testlib::init();
     test_tcp_one_server_one_client_blocking();
-    //test_tcp_one_server_many_clients_blocking();
-    //test_tcp_one_server_one_client_non_blocking();
-    //test_tcp_one_server_many_clients_non_blocking();
+    test_tcp_one_server_many_clients_blocking();
+    test_tcp_one_server_one_client_non_blocking();
+    test_tcp_one_server_many_clients_non_blocking();
     testlib::cleanup();
     system("pause");
     return 0;

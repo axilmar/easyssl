@@ -692,6 +692,19 @@ static SSL_CTX* handle_context_creation(EASYSSL_SECURITY_DATA_STRUCT* sd, SSL_CT
 }
 
 
+//handshake finished callback
+static void ssl_handshake_finished(const SSL* ssl, int where, int ret) {
+    if (where & SSL_CB_HANDSHAKE_DONE) {
+        //restore the socket's tcp no delay value
+        char off = 0;
+        setsockopt((EASYSSL_SOCKET_HANDLE)SSL_get_fd(ssl), IPPROTO_TCP, TCP_NODELAY, &off, sizeof(off));
+
+        //delete the cookie verify context
+        delete_cookie_verify_context((SSL*)ssl);
+    }
+}
+
+
 //get or create tcp server context
 static SSL_CTX* tcp_get_or_create_server_context(EASYSSL_SECURITY_DATA_STRUCT* sd) {
     lock_mutex(&sd->mutex);
@@ -713,6 +726,9 @@ static SSL_CTX* tcp_get_or_create_server_context(EASYSSL_SECURITY_DATA_STRUCT* s
     //set cookie verification methods
     SSL_CTX_set_stateless_cookie_generate_cb(result, generate_cookie);
     SSL_CTX_set_stateless_cookie_verify_cb(result, verify_cookie);
+
+    //set state change method in order to free resources when the handshake finishes
+    SSL_CTX_set_info_callback(result, ssl_handshake_finished);
 
     //success
     unlock_mutex(&sd->mutex);
@@ -760,68 +776,6 @@ static void tcp_accept_failure_cleanup(EASYSSL_SOCKET sock) {
     sock->retry_mode = SOCKET_RETRY_NONE;
     sock->ssl = NULL;
 
-}
-
-
-//tcp ssl accept success
-static int tcp_accept_ssl_success(EASYSSL_SOCKET sock) {
-    //restore the socket's tcp no delay value
-    char off = 0;
-    setsockopt(sock->handle, IPPROTO_TCP, TCP_NODELAY, &off, sizeof(off));
-
-    //cleanup the socket
-    delete_cookie_verify_context(sock->ssl);
-    sock->retry_mode = SOCKET_RETRY_NONE;
-
-    //finally, a secure socket for the client is created on the server side, with completed handshake
-    return EASYSSL_SOCKET_SUCCESS;
-}
-
-
-//tcp ssl accept
-static int tcp_accept_ssl(EASYSSL_SOCKET sock) {
-    //the socket must be in SSL retry mode
-    if (sock->retry_mode != SOCKET_RETRY_SSL) {
-        return EASYSSL_SOCKET_SUCCESS;
-    }
-
-    //accept
-    int r = SSL_accept(sock->ssl);
-
-    //handle accept result
-    switch (SSL_get_error(sock->ssl, r)) {
-        case SSL_ERROR_NONE:
-            return tcp_accept_ssl_success(sock);
-
-        case SSL_ERROR_ZERO_RETURN:
-            tcp_accept_failure_cleanup(sock);
-            set_error(EASYSSL_ERROR_OPENSSL, SSL_ERROR_ZERO_RETURN);
-            return EASYSSL_SOCKET_CLOSED;
-
-        case SSL_ERROR_WANT_READ:
-        case SSL_ERROR_WANT_WRITE:
-        case SSL_ERROR_WANT_CONNECT:
-        case SSL_ERROR_WANT_ACCEPT:
-        case SSL_ERROR_WANT_X509_LOOKUP:
-        case SSL_ERROR_WANT_ASYNC:
-        case SSL_ERROR_WANT_ASYNC_JOB:
-        case SSL_ERROR_WANT_CLIENT_HELLO_CB:
-            return EASYSSL_SOCKET_RETRY;
-
-        case SSL_ERROR_SYSCALL:
-            tcp_accept_failure_cleanup(sock);
-            handle_syscall_error();
-            return EASYSSL_SOCKET_ERROR;
-
-        case SSL_ERROR_SSL:
-            tcp_accept_failure_cleanup(sock);
-            set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
-            return EASYSSL_SOCKET_ERROR;
-    }
-
-    tcp_accept_failure_cleanup(sock);
-    set_einval("Unknown error returned by SSL_get_error in function tcp_accept_ssl.");
-    return EASYSSL_SOCKET_ERROR;
 }
 
 
@@ -878,7 +832,7 @@ static int tcp_accept_socket(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EA
     new_sock->security_data = sock->security_data;
     new_sock->ssl = ssl;
     new_sock->type_stream = EASYSSL_TRUE;
-    new_sock->retry_mode = SOCKET_RETRY_SSL;
+    new_sock->retry_mode = SOCKET_RETRY_NONE;
     new_sock->blocking = sock->blocking;
 
     //return the new socket
@@ -893,6 +847,9 @@ static int tcp_accept_socket(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EA
     //turn Nagle's algorithm off for the handshake in order to allow ACK to be returned as soon as possible
     char on = 1;
     setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+
+    //set the socket in accept state (for ssl)
+    SSL_set_accept_state(ssl);
 
     //success; a secure socket (that hasn't done the handshake yet) for the client is created on the server side
     return EASYSSL_SOCKET_SUCCESS;
@@ -1186,20 +1143,6 @@ static EASYSSL_BOOL udp_connect(EASYSSL_SOCKET socket, const EASYSSL_SOCKET_ADDR
 }
 
 
-//////////////////////////////////////////////////
-//  TCP/UDP SOCKET FUNCTIONS
-//////////////////////////////////////////////////
-
-
-//handles accept state
-static int socket_accept_ssl(EASYSSL_SOCKET_STRUCT* sock) {
-    if (sock->type_stream) {
-        return tcp_accept_ssl(sock);
-    }
-    return EASYSSL_SOCKET_SUCCESS;
-}
-
-
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //  PUBLIC FUNCTIONS
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1472,7 +1415,10 @@ EASYSSL_BOOL EASYSSL_close(EASYSSL_SOCKET socket) {
             #endif
         }
 
-        //free its ssl part, if set
+        //delete the cookie verify context
+        delete_cookie_verify_context(socket->ssl);
+
+        //free the ssl structure
         SSL_free(socket->ssl);
     }
 
@@ -1580,14 +1526,8 @@ int EASYSSL_send(EASYSSL_SOCKET socket, const void* buffer, int buffer_size) {
         return EASYSSL_SOCKET_ERROR;
     }
 
-    //if socket is in accept mode, handle hanshake
-    int r = socket_accept_ssl(socket);
-    if (r != EASYSSL_SOCKET_SUCCESS) {
-        return r;
-    }
-
     //write data
-    r = SSL_write(socket->ssl, buffer, buffer_size);
+    int r = SSL_write(socket->ssl, buffer, buffer_size);
 
     //success
     if (r > 0) {
@@ -1639,14 +1579,8 @@ int EASYSSL_recv(EASYSSL_SOCKET socket, void* buffer, int buffer_size) {
         return EASYSSL_SOCKET_ERROR;
     }
 
-    //if socket is in accept mode, handle hanshake
-    int r = socket_accept_ssl(socket);
-    if (r != EASYSSL_SOCKET_SUCCESS) {
-        return r;
-    }
-
     //read data
-    r = SSL_read(socket->ssl, buffer, buffer_size);
+    int r = SSL_read(socket->ssl, buffer, buffer_size);
 
     //success
     if (r > 0) {

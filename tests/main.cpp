@@ -387,9 +387,9 @@ static void test_tcp_one_server_many_clients_non_blocking() {
 int main() {
     testlib::init();
     test_tcp_one_server_one_client_blocking();
-    test_tcp_one_server_many_clients_blocking();
-    test_tcp_one_server_one_client_non_blocking();
-    test_tcp_one_server_many_clients_non_blocking();
+    //test_tcp_one_server_many_clients_blocking();
+    //test_tcp_one_server_one_client_non_blocking();
+    //test_tcp_one_server_many_clients_non_blocking();
     testlib::cleanup();
     system("pause");
     return 0;

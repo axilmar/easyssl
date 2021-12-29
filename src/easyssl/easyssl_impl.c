@@ -739,22 +739,6 @@ static SSL_CTX* tcp_get_or_create_client_context(EASYSSL_SECURITY_DATA_STRUCT* s
 }
 
 
-//verify connection
-static EASYSSL_BOOL verify_connection(SSL* ssl) {
-    //get verification result
-    long lr = SSL_get_verify_result(ssl);
-
-    //success
-    if (lr == X509_V_OK) {
-        return EASYSSL_TRUE;
-    }
-
-    //error
-    set_error(EASYSSL_ERROR_OPENSSL, lr);
-    return EASYSSL_FALSE;
-}
-
-
 //////////////////////////////////////////////////
 //  TCP ACCEPT FUNCTIONS
 //////////////////////////////////////////////////
@@ -781,12 +765,6 @@ static void tcp_accept_failure_cleanup(EASYSSL_SOCKET sock) {
 
 //tcp ssl accept success
 static int tcp_accept_ssl_success(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr) {
-    //if verification failed
-    if (!verify_connection(sock->ssl)) {
-        tcp_accept_failure_cleanup(sock);
-        return EASYSSL_SOCKET_ERROR;
-    }
-
     //allocate memory for new socket
     EASYSSL_SOCKET_STRUCT* new_sock = (EASYSSL_SOCKET_STRUCT*)malloc(sizeof(EASYSSL_SOCKET_STRUCT));
 
@@ -979,12 +957,6 @@ static void tcp_connect_failure_cleanup(EASYSSL_SOCKET sock) {
 
 //ssl connect success
 static int tcp_connect_ssl_success(EASYSSL_SOCKET sock) {
-    //verify connection
-    if (!verify_connection(sock->ssl)) {
-        tcp_connect_failure_cleanup(sock);
-        return EASYSSL_SOCKET_ERROR;
-    }
-
     //success; restore the no delay parameter
     char tcp_nodelay = (char)SSL_get_app_data(sock->ssl);
     setsockopt(sock->handle, IPPROTO_TCP, TCP_NODELAY, &tcp_nodelay, sizeof(tcp_nodelay));

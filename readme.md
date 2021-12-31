@@ -224,13 +224,128 @@ int main() {
 }
 ```
 
-(the following content is to be written in the near future)
+## Blocking vs non-blocking sockets
 
-Non-blocking sockets in C
+The function `EASYSSL_socket` has the following signature:
 
-Non-blocking sockets in C++
+```c
+EASYSSL_SOCKET EASYSSL_socket(EASYSSL_SECURITY_DATA security_data, int address_family, int socket_type, int protocol, EASYSSL_BOOL blocking);
+```
 
-Error handling in C
+The last parameter defines if a socket is created as blocking or non-blocking.
 
-Error Handling in C++
+### Blocking sockets blocking functions
+
+A blocking socket blocks the execution of the current thread in the following functions:
+
+- shutdown
+- accept
+- connect
+- recv
+- close
+
+### Non-blocking sockets blocking functions
+
+A non-blocking socket blocks the execution of the current thread in the following functions:
+
+- close 
+
+### Handling non-blocking socket operations
+
+In order to handle non-blocking sockets, the enumeration `EASYSSL_SOCKET_STATUS` provides the following values:
+
+- `EASYSSL_SOCKET_CLOSED`: the connection is closed by the peer or the socket handle is no longer valid.
+- `EASYSSL_SOCKET_RETRY`: the operation needs to be retried.
+- `EASYSSL_SOCKET_CONNECTION_REFUSED`: connection refused by peer.
+- `EASYSSL_SOCKET_ERROR`: there was an error.
+- `EASYSSL_SOCKET_SUCCESS`: the operation was successful.
+
+For example, connecting a non-blocking socket can be written like this:
+
+```c
+CONNECT:
+switch (EASYSSL_connect(socket, &addr)) {
+    case EASYSSL_SOCKET_CLOSED:
+        printf("Socket is closed\n");
+        break;
+        
+    case EASY_SSL_SOCKET_RETRY:
+        wait_for_retry();
+        goto CONNECT;
+        
+    case EASY_SSL_SOCKET_CONNECTION_REFUSED:
+        printf("Connection refused\n");
+        break;
+        
+    case EASYSSL_SOCKET_ERROR:
+        printf("There was an error.\n");
+        break;
+        
+    case EASYSSL_SOCKET_SUCCESS:
+        printf("Connected\n");
+        break;
+}
+```
+
+### Using poll/select with sockets
+
+Poll/select (or other, e.g. epoll) can be used to poll a socket.
+
+The function `EASYSSL_get_socket_handle` returns the socket's native handle, which can then be used for polling.
+
+## Error handling
+
+The function `EASYSSL_get_last_error` returns a pointer to the current thread's last error.
+
+The struct `EASYSSL_ERROR` has the following form:
+
+```c
+/**
+ * Error structure.
+ */
+typedef struct EASYSSL_ERROR {
+    /**
+     * Error category.
+     */
+    int category;
+
+    /**
+     * Error number.
+     */
+    int number;
+} EASYSSL_ERROR;
+```
+
+The error category enumeration is the following:
+
+```c
+/**
+ * Error category.
+ */
+enum EASYSSL_ERROR_CATEGORY {
+    /**
+     * System error; error can be retrieved from the 'errno' variable.
+     */
+    EASYSSL_ERROR_SYSTEM,
+
+    /**
+     * Sockets error; valid on Windows only; error can be retrieved by the WSAGetLastError() function.
+     */
+     EASYSSL_ERROR_WINSOCK,
+
+     /**
+      * Openssl error; error can be retrieved by the ERR_get_error() function.
+      */
+      EASYSSL_ERROR_OPENSSL,
+
+      /**
+       * Easyssl error.
+       */
+       EASYSSL_ERROR_EASYSSL
+};
+```
+
+The `number` field of the `EASYSSL_ERROR` structure depends on the error category.
+
+In C++, the class `easyssl::error`, derived from `struct EASYSSL_ERROR`, is thrown when there is an error.
 

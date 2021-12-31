@@ -347,7 +347,7 @@ enum EASYSSL_ERROR_CATEGORY {
 
 The `number` field of the `EASYSSL_ERROR` structure depends on the error category.
 
-The function `EASYSSL_BOOL EASYSSL_get_error_string` can be used to retrieve the text of the error.
+The function `EASYSSL_get_error_string` can be used to retrieve the text of the error.
 
 In C++, the class `easyssl::error`, derived from `struct EASYSSL_ERROR`, is thrown when there is an error; the member function `what()` returns the error text.
 

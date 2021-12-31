@@ -3,28 +3,28 @@
 
 
 /**
- * Error category.
+ * Error category. 
  */
 enum EASYSSL_ERROR_CATEGORY {
     /**
-     * System error; error can be retrieved from the 'errno' variable.
+     * System error; error can be retrieved from the 'errno' variable. 
      */
     EASYSSL_ERROR_SYSTEM,
 
     /**
-     * Sockets error; valid on Windows only; error can be retrieved by the WSAGetLastError() function.
+     * Sockets error; valid on Windows only; error can be retrieved by the WSAGetLastError() function. 
      */
-     EASYSSL_ERROR_WINSOCK,
+    EASYSSL_ERROR_WINSOCK,
 
-     /**
-      * Openssl error; error can be retrieved by the ERR_get_error() function.
-      */
-      EASYSSL_ERROR_OPENSSL,
+    /**
+     * Openssl error; error can be retrieved by the ERR_get_error() function.
+     */
+    EASYSSL_ERROR_OPENSSL,
 
-      /**
-       * Easyssl error.
-       */
-       EASYSSL_ERROR_EASYSSL
+    /**
+     * Easyssl error.
+     */
+    EASYSSL_ERROR_EASYSSL
 };
 
 

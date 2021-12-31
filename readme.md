@@ -220,7 +220,7 @@ int main() {
     
     //send reply
     string reply = "hello client!";
-    sock.receive(reply.data(), reply.size());
+    sock.send(reply.data(), reply.size());
 }
 ```
 

@@ -349,3 +349,12 @@ The `number` field of the `EASYSSL_ERROR` structure depends on the error categor
 
 In C++, the class `easyssl::error`, derived from `struct EASYSSL_ERROR`, is thrown when there is an error.
 
+## Thread safety
+
+No object is thread safe, except `EASYSSL_SECURITY_DATA`, which can be created by one thread and used by many other threads.
+
+## Dependencies
+
+- OpenSSL 3.0, used as the ssl implementation (https://www.openssl.org/).
+- loglib, used for logging error messages (https://github.com/axilmar/loglib).
+

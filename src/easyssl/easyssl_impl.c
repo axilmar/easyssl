@@ -24,6 +24,14 @@
 #endif
 
 
+//thread yield macro
+#ifdef _WIN32
+#define thread_yield() Sleep(0)
+#else
+#define thread_yield() pthread_yield()
+#endif
+
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //  PRIVATE TYPES
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -736,8 +744,9 @@ static SSL_CTX* handle_context_creation(EASYSSL_SECURITY_DATA_STRUCT* sd, SSL_CT
         return NULL;
     }
 
-    //set the cipher list
-    SSL_CTX_set_cipher_list(ctx, OSSL_default_ciphersuites());
+    //set the cipher lists
+    SSL_CTX_set_cipher_list(ctx, OSSL_default_cipher_list());
+    SSL_CTX_set_ciphersuites(ctx, OSSL_default_ciphersuites());
 
     //set the verification mode
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
@@ -1090,32 +1099,50 @@ static EASYSSL_BOOL create_ssl(EASYSSL_SOCKET sock, SSL_CTX* ctx) {
 }
 
 
-//successful connect socket
-static int connect_socket_success(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr, SSL_CTX* ctx) {
-    //create the ssl
+//create ssl for udp
+static EASYSSL_BOOL create_ssl_udp(EASYSSL_SOCKET sock, SSL_CTX* ctx) {
+    //if failed to create the ssl
     if (!create_ssl(sock, ctx)) {
-        return EASYSSL_SOCKET_ERROR;
+        return EASYSSL_FALSE;
     }
 
-    //for tcp, set tcp no delay so as that the handshake is done asap
-    if (sock->type_stream) {
-        set_tcp_no_delay(sock->ssl);
+    //create a dgram bio
+    BIO* bio = BIO_new_dgram((int)sock->handle, BIO_NOCLOSE);
+
+    //if failed to create the bio
+    if (!bio) {
+        SSL_free(sock->ssl);
+        sock->ssl = NULL;
+        sock->retry_mode = SOCKET_RETRY_NONE;
+        set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+        return EASYSSL_FALSE;
     }
 
-    //else, for udp, set the ssl to connected state
-    else {
-        BIO_ctrl(SSL_get_rbio(sock->ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, (void*)addr);
-        BIO_ctrl(SSL_get_wbio(sock->ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, (void*)addr);
-    }
+    //set the bio
+    SSL_set_bio(sock->ssl, bio, bio);
 
-    //continue with ssl connect
-    return connect_ssl(sock, addr);
+    return EASYSSL_TRUE;
 }
 
 
 //////////////////////////////////////////////////
 //  TCP CONNECT FUNCTIONS
 //////////////////////////////////////////////////
+
+
+//successful connect socket
+static int tcp_connect_socket_success(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr, SSL_CTX* ctx) {
+    //create the ssl
+    if (!create_ssl(sock, ctx)) {
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //set no delay so as that the handshake finishes asap
+    set_tcp_no_delay(sock->ssl);
+
+    //continue with ssl connect
+    return connect_ssl(sock, addr);
+}
 
 
 //connect socket
@@ -1140,7 +1167,7 @@ static int tcp_connect_socket(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS*
         return EASYSSL_SOCKET_ERROR;
     }
 
-    return connect_socket_success(sock, addr, sock->security_data->tcp_client_ctx);
+    return tcp_connect_socket_success(sock, addr, sock->security_data->tcp_client_ctx);
 }
 
 
@@ -1183,7 +1210,7 @@ static int tcp_connect_socket_select(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_A
 
     //if success, continue with the ssl part of the connection
     if (FD_ISSET(sock->handle, &fds_write)) {
-        return connect_socket_success(sock, addr, sock->security_data->tcp_client_ctx);
+        return tcp_connect_socket_success(sock, addr, sock->security_data->tcp_client_ctx);
     }
 
     //should not happen
@@ -1301,7 +1328,7 @@ static int udp_accept_listen_success(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_so
 }
 
 
-//udp listen
+//udp listen helper
 static int udp_accept_listen(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr) {
     int err = DTLSv1_listen(sock->ssl, (BIO_ADDR*)addr);
 
@@ -1317,8 +1344,33 @@ static int udp_accept_listen(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EA
     }
 
     //fatal error
+    switch (SSL_get_error(sock->ssl, err)) {
+        case SSL_ERROR_ZERO_RETURN:
+            return EASYSSL_SOCKET_CLOSED;
+
+        case SSL_ERROR_WANT_READ:
+        case SSL_ERROR_WANT_WRITE:
+        case SSL_ERROR_WANT_CONNECT:
+        case SSL_ERROR_WANT_ACCEPT:
+        case SSL_ERROR_WANT_X509_LOOKUP:
+        case SSL_ERROR_WANT_ASYNC:
+        case SSL_ERROR_WANT_ASYNC_JOB:
+        case SSL_ERROR_WANT_CLIENT_HELLO_CB:
+            return EASYSSL_SOCKET_RETRY;
+
+        case SSL_ERROR_SYSCALL:
+            udp_accept_listen_failure_cleanup(sock);
+            handle_syscall_error();
+            return EASYSSL_SOCKET_ERROR;
+
+        case SSL_ERROR_SSL:
+            udp_accept_listen_failure_cleanup(sock);
+            set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+            return EASYSSL_SOCKET_ERROR;
+    }
+
     udp_accept_listen_failure_cleanup(sock);
-    set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+    set_einval("Unknown error returned by SSL_get_error in function udp_accept_listen_helper.");
     return EASYSSL_SOCKET_ERROR;
 }
 
@@ -1342,9 +1394,10 @@ static int udp_accept_init(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASY
     }
 
     //create the ssl
-    if (!create_ssl(sock, ctx)) {
+    if (!create_ssl_udp(sock, ctx)) {
         return EASYSSL_SOCKET_ERROR;
     }
+    SSL_set_options(sock->ssl, SSL_OP_COOKIE_EXCHANGE);
 
     //init cookie verify context on the new socket
     if (!init_cookie_verify_context(sock->ssl)) {
@@ -1352,7 +1405,6 @@ static int udp_accept_init(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASY
         sock->ssl = NULL;
         return EASYSSL_SOCKET_ERROR;
     }
-    SSL_set_options(sock->ssl, SSL_OP_COOKIE_EXCHANGE);
 
     //start listen mode
     return udp_accept_listen(sock, new_socket, addr);
@@ -1378,6 +1430,21 @@ static int udp_accept(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_S
 //////////////////////////////////////////////////
 //  UDP CONNECT FUNCTIONS
 //////////////////////////////////////////////////
+
+
+//successful connect socket
+static int udp_connect_socket_success(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr, SSL_CTX* ctx) {
+    //create the ssl
+    if (!create_ssl_udp(sock, ctx)) {
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //set the peer address
+    BIO_ctrl(SSL_get_rbio(sock->ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, (void*)addr);
+
+    //continue with ssl connect
+    return connect_ssl(sock, addr);
+}
 
 
 //init connect
@@ -1406,7 +1473,7 @@ static int udp_connect_init(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* a
     }
 
     //continue with connecting the socket
-    return connect_socket_success(sock, addr, ctx);
+    return udp_connect_socket_success(sock, addr, ctx);
 }
 
 

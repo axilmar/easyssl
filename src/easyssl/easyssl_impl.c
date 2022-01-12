@@ -382,6 +382,15 @@ static void crypto_locking_callback(int mode, int type, const char* file, int li
 }
 
 
+//check if socket is udp
+static EASYSSL_BOOL is_udp_socket(EASYSSL_SOCKET_HANDLE handle) {
+    int type;
+    int length = sizeof(int);
+    getsockopt(handle, SOL_SOCKET, SO_TYPE, (char*)&type, &length);
+    return type == SOCK_DGRAM;
+}
+
+
 //////////////////////////////////////////////////
 //  SHUTDOWN FUNCTIONS
 //////////////////////////////////////////////////
@@ -578,13 +587,23 @@ static void delete_cookie_verify_context(SSL* ssl) {
 //restores the tcp no delay option
 static void restore_tcp_no_delay(SSL* ssl) {
     EASYSSL_SOCKET_HANDLE handle = (EASYSSL_SOCKET_HANDLE)SSL_get_fd(ssl);
+    if (is_udp_socket(handle)) {
+        return;
+    }
     char on = (char)SSL_get_ex_data(ssl, 1);
     setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 }
 
 
 //sets the tcp no delay option
-static void set_tcp_no_delay(SSL* ssl) {
+static void set_tcp_no_delay(EASYSSL_SOCKET socket) {
+    //do nothing for udp
+    if (!socket->type_stream) {
+        return;
+    }
+
+    SSL* ssl = socket->ssl;
+
     EASYSSL_SOCKET_HANDLE handle = (EASYSSL_SOCKET_HANDLE)SSL_get_fd(ssl);
 
     //save the tcp no delay option to restore it later
@@ -780,6 +799,25 @@ static SSL_CTX* tcp_get_or_create_client_context(EASYSSL_SECURITY_DATA_STRUCT* s
 }
 
 
+//get or create udp client context
+static SSL_CTX* udp_get_or_create_client_context(EASYSSL_SECURITY_DATA_STRUCT* sd) {
+    lock_mutex(&sd->mutex);
+
+    //if already created, do nothing else
+    if (sd->udp_client_ctx) {
+        unlock_mutex(&sd->mutex);
+        return sd->udp_client_ctx;
+    }
+
+    //create the context
+    SSL_CTX* result = handle_context_creation(sd, &sd->udp_client_ctx, SSL_CTX_new(DTLS_client_method()));
+
+    //success
+    unlock_mutex(&sd->mutex);
+    return result;
+}
+
+
 //////////////////////////////////////////////////
 //  TCP ACCEPT FUNCTIONS
 //////////////////////////////////////////////////
@@ -870,7 +908,7 @@ static int tcp_accept_socket(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EA
     }
 
     //turn Nagle's algorithm off for the handshake in order to allow ACK to be returned as soon as possible
-    set_tcp_no_delay(ssl);
+    set_tcp_no_delay(new_sock);
 
     //set the socket in accept state (for ssl)
     SSL_set_accept_state(ssl);
@@ -924,12 +962,12 @@ static int tcp_accept(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_S
 
 
 //////////////////////////////////////////////////
-//  TCP CONNECT FUNCTIONS
+//  UDP/TCP CONNECT FUNCTIONS
 //////////////////////////////////////////////////
 
 
 //failure cleanup
-static void tcp_connect_failure_cleanup(EASYSSL_SOCKET sock) {
+static void connect_failure_cleanup(EASYSSL_SOCKET sock) {
     SSL_free(sock->ssl);
     sock->ssl = NULL;
     sock->retry_mode = SOCKET_RETRY_NONE;
@@ -937,7 +975,7 @@ static void tcp_connect_failure_cleanup(EASYSSL_SOCKET sock) {
 
 
 //ssl connect success
-static int tcp_connect_ssl_success(EASYSSL_SOCKET sock) {
+static int connect_ssl_success(EASYSSL_SOCKET sock) {
     //success; restore the no delay parameter
     restore_tcp_no_delay(sock->ssl);
 
@@ -950,17 +988,17 @@ static int tcp_connect_ssl_success(EASYSSL_SOCKET sock) {
 
 
 //connect ssl
-static int tcp_connect_ssl(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr) {
+static int connect_ssl(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr) {
     //ssl connect
     int r =  SSL_connect(sock->ssl);
 
     //handle error
     switch (SSL_get_error(sock->ssl, r)) {
         case SSL_ERROR_NONE:
-            return tcp_connect_ssl_success(sock);
+            return connect_ssl_success(sock);
 
         case SSL_ERROR_ZERO_RETURN:
-            tcp_connect_failure_cleanup(sock);
+            connect_failure_cleanup(sock);
             set_error(EASYSSL_ERROR_OPENSSL, SSL_ERROR_ZERO_RETURN);
             return EASYSSL_SOCKET_CLOSED;
 
@@ -976,25 +1014,25 @@ static int tcp_connect_ssl(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* ad
             return EASYSSL_SOCKET_RETRY;
 
         case SSL_ERROR_SYSCALL:
-            tcp_connect_failure_cleanup(sock);
+            connect_failure_cleanup(sock);
             handle_syscall_error();
             return EASYSSL_SOCKET_ERROR;
 
         case SSL_ERROR_SSL:
-            tcp_connect_failure_cleanup(sock);
+            connect_failure_cleanup(sock);
             set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
             return EASYSSL_SOCKET_ERROR;
     }
 
-    set_einval("Unknown error returned by SSL_get_error in function tcp_connect_ssl.");
+    set_einval("Unknown error returned by SSL_get_error in function connect_ssl.");
     return EASYSSL_SOCKET_ERROR;
 }
 
 
-//successful tcp connect socket
-static int tcp_connect_socket_success(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr) {
+//successful connect socket
+static int connect_socket_success(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr) {
     //create the SSL
-    SSL* ssl = SSL_new(sock->security_data->tcp_client_ctx);
+    SSL* ssl = SSL_new(sock->type_stream ? sock->security_data->tcp_client_ctx : sock->security_data->udp_client_ctx);
 
     //if failed to create the ssl
     if (!ssl) {
@@ -1010,11 +1048,16 @@ static int tcp_connect_socket_success(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_
     sock->ssl = ssl;
 
     //turn Nagle's algorithm off for the handshake in order to allow ACK to be returned as soon as possible
-    set_tcp_no_delay(ssl);
+    set_tcp_no_delay(sock);
 
     //continue with ssl connect
-    return tcp_connect_ssl(sock, addr);
+    return connect_ssl(sock, addr);
 }
+
+
+//////////////////////////////////////////////////
+//  TCP CONNECT FUNCTIONS
+//////////////////////////////////////////////////
 
 
 //connect socket
@@ -1039,7 +1082,7 @@ static int tcp_connect_socket(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS*
         return EASYSSL_SOCKET_ERROR;
     }
 
-    return tcp_connect_socket_success(sock, addr);
+    return connect_socket_success(sock, addr);
 }
 
 
@@ -1082,7 +1125,7 @@ static int tcp_connect_socket_select(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_A
 
     //if success, continue with the ssl part of the connection
     if (FD_ISSET(sock->handle, &fds_write)) {
-        return tcp_connect_socket_success(sock, addr);
+        return connect_socket_success(sock, addr);
     }
 
     //should not happen
@@ -1127,7 +1170,7 @@ static int tcp_connect(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr) 
             return tcp_connect_socket_select(sock, addr);
 
         case SOCKET_RETRY_SSL:
-            return tcp_connect_ssl(sock, addr);
+            return connect_ssl(sock, addr);
     }
 
     set_einval("Invalid retry mode in function tcp_connect.");
@@ -1152,10 +1195,41 @@ static int udp_accept(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_S
 //////////////////////////////////////////////////
 
 
+//init connect
+static int udp_connect_init(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr) {
+    clear_errors();
+
+    //the socket must not have an ssl
+    if (sock->ssl) {
+        set_einval("Invalid socket in function udp_connect_init.");
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //create context for udp if not yet created
+    SSL_CTX* ctx = udp_get_or_create_client_context(sock->security_data);
+
+    //if failed to create context
+    if (!ctx) {
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //continue with connecting the socket
+    return connect_socket_success(sock, addr);
+}
+
+
 //udp connect
 static EASYSSL_BOOL udp_connect(EASYSSL_SOCKET socket, const EASYSSL_SOCKET_ADDRESS* addr) {
-    //TODO
-    return EASYSSL_TRUE;
+    switch (socket->retry_mode) {
+        case SOCKET_RETRY_NONE:
+            return udp_connect_init(socket, addr);
+
+        case SOCKET_RETRY_SSL:
+            return connect_ssl(socket, addr);
+    }
+
+    set_einval("Invalid retry mode in function udp_connect.");
+    return EASYSSL_SOCKET_ERROR;
 }
 
 
@@ -1209,7 +1283,7 @@ EASYSSL_BOOL EASYSSL_cleanup() {
     }
     free(crypto_mutexes);
 
-    //clenaup openssl
+    //cleanup openssl
     ENGINE_cleanup();
     CONF_modules_unload(1);
     EVP_cleanup();

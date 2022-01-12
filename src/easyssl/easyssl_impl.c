@@ -571,6 +571,21 @@ static int verify_cookie(SSL* ssl, const unsigned char* cookie, size_t cookie_le
 }
 
 
+//udp callback has a cookie len parameter that differs from the one in tcp callback
+static int generate_cookie_udp(SSL* ssl, unsigned char* cookie, unsigned int* cookie_len) {
+    size_t cl;
+    int result = generate_cookie(ssl, cookie, &cl);
+    *cookie_len = (unsigned int)cl;
+    return result;
+}
+
+
+//udp callback has a cookie len parameter that differs from the one in tcp callback
+static int verify_cookie_udp(SSL* ssl, const unsigned char* cookie, unsigned int cookie_len) {
+    return verify_cookie(ssl, cookie, cookie_len);
+}
+
+
 //delete cookie verify context
 static void delete_cookie_verify_context(SSL* ssl) {
     void* cookie_verify_data = SSL_get_app_data(ssl);
@@ -596,14 +611,7 @@ static void restore_tcp_no_delay(SSL* ssl) {
 
 
 //sets the tcp no delay option
-static void set_tcp_no_delay(EASYSSL_SOCKET socket) {
-    //do nothing for udp
-    if (!socket->type_stream) {
-        return;
-    }
-
-    SSL* ssl = socket->ssl;
-
+static void set_tcp_no_delay(SSL* ssl) {
     EASYSSL_SOCKET_HANDLE handle = (EASYSSL_SOCKET_HANDLE)SSL_get_fd(ssl);
 
     //save the tcp no delay option to restore it later
@@ -799,6 +807,37 @@ static SSL_CTX* tcp_get_or_create_client_context(EASYSSL_SECURITY_DATA_STRUCT* s
 }
 
 
+//get or create udp server context
+static SSL_CTX* udp_get_or_create_server_context(EASYSSL_SECURITY_DATA_STRUCT* sd) {
+    lock_mutex(&sd->mutex);
+
+    //if already created, do nothing else
+    if (sd->udp_server_ctx) {
+        unlock_mutex(&sd->mutex);
+        return sd->udp_server_ctx;
+    }
+
+    //create the context
+    SSL_CTX* result = handle_context_creation(sd, &sd->udp_server_ctx, SSL_CTX_new(DTLS_server_method()));
+
+    //if failure
+    if (!result) {
+        return NULL;
+    }
+
+    //set cookie verification methods
+    SSL_CTX_set_cookie_generate_cb(result, generate_cookie_udp);
+    SSL_CTX_set_cookie_verify_cb(result, &verify_cookie_udp);
+
+    //set state change method in order to free resources when the handshake finishes
+    SSL_CTX_set_info_callback(result, ssl_handshake_finished);
+
+    //success
+    unlock_mutex(&sd->mutex);
+    return result;
+}
+
+
 //get or create udp client context
 static SSL_CTX* udp_get_or_create_client_context(EASYSSL_SECURITY_DATA_STRUCT* sd) {
     lock_mutex(&sd->mutex);
@@ -908,7 +947,7 @@ static int tcp_accept_socket(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EA
     }
 
     //turn Nagle's algorithm off for the handshake in order to allow ACK to be returned as soon as possible
-    set_tcp_no_delay(new_sock);
+    set_tcp_no_delay(ssl);
 
     //set the socket in accept state (for ssl)
     SSL_set_accept_state(ssl);
@@ -1029,16 +1068,16 @@ static int connect_ssl(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr) 
 }
 
 
-//successful connect socket
-static int connect_socket_success(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr) {
+//create ssl
+static EASYSSL_BOOL create_ssl(EASYSSL_SOCKET sock, SSL_CTX* ctx) {
     //create the SSL
-    SSL* ssl = SSL_new(sock->type_stream ? sock->security_data->tcp_client_ctx : sock->security_data->udp_client_ctx);
+    SSL* ssl = SSL_new(ctx);
 
     //if failed to create the ssl
     if (!ssl) {
         sock->retry_mode = SOCKET_RETRY_NONE;
         set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
-        return EASYSSL_SOCKET_ERROR;
+        return EASYSSL_FALSE;
     }
 
     //set the socket handle
@@ -1047,8 +1086,27 @@ static int connect_socket_success(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDR
     //store the ssl in the socket 
     sock->ssl = ssl;
 
-    //turn Nagle's algorithm off for the handshake in order to allow ACK to be returned as soon as possible
-    set_tcp_no_delay(sock);
+    return EASYSSL_TRUE;
+}
+
+
+//successful connect socket
+static int connect_socket_success(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr, SSL_CTX* ctx) {
+    //create the ssl
+    if (!create_ssl(sock, ctx)) {
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //for tcp, set tcp no delay so as that the handshake is done asap
+    if (sock->type_stream) {
+        set_tcp_no_delay(sock->ssl);
+    }
+
+    //else, for udp, set the ssl to connected state
+    else {
+        BIO_ctrl(SSL_get_rbio(sock->ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, (void*)addr);
+        BIO_ctrl(SSL_get_wbio(sock->ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, (void*)addr);
+    }
 
     //continue with ssl connect
     return connect_ssl(sock, addr);
@@ -1082,7 +1140,7 @@ static int tcp_connect_socket(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS*
         return EASYSSL_SOCKET_ERROR;
     }
 
-    return connect_socket_success(sock, addr);
+    return connect_socket_success(sock, addr, sock->security_data->tcp_client_ctx);
 }
 
 
@@ -1125,7 +1183,7 @@ static int tcp_connect_socket_select(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_A
 
     //if success, continue with the ssl part of the connection
     if (FD_ISSET(sock->handle, &fds_write)) {
-        return connect_socket_success(sock, addr);
+        return connect_socket_success(sock, addr, sock->security_data->tcp_client_ctx);
     }
 
     //should not happen
@@ -1183,10 +1241,137 @@ static int tcp_connect(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* addr) 
 //////////////////////////////////////////////////
 
 
+//handle failure
+static void udp_accept_listen_failure_cleanup(EASYSSL_SOCKET sock) {
+    SSL_free(sock->ssl);
+    sock->ssl = NULL;
+    sock->retry_mode = SOCKET_RETRY_NONE;
+}
+
+
+//udp listen success
+static int udp_accept_listen_success(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr) {
+    //create the client socket
+    EASYSSL_SOCKET client_socket = EASYSSL_socket(sock->security_data, addr->sa.sa_family, SOCK_DGRAM, 0, sock->blocking);
+
+    //fail to create a new socket
+    if (!client_socket) {
+        udp_accept_listen_failure_cleanup(sock);
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //get the server socket address in order to bind the client socket to it
+    EASYSSL_SOCKET_ADDRESS server_addr;
+    EASYSSL_getsockname(sock, &server_addr);
+
+    //bind the socket to the same address as the server socket
+    if (!EASYSSL_bind(client_socket, &server_addr)) {
+        EASYSSL_close(client_socket);
+        udp_accept_listen_failure_cleanup(sock);
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //connect the client socket (set the peer address)
+    if (connect(client_socket->handle, &addr->sa, sizeof(EASYSSL_SOCKET_ADDRESS))) {
+        EASYSSL_close(client_socket);
+        udp_accept_listen_failure_cleanup(sock);
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //success
+
+    //return client socket
+    *new_socket = client_socket;
+
+    //set the client socket's ssl
+    client_socket->ssl = sock->ssl;
+
+    //set the ssl for the new client connection
+    BIO_set_fd(SSL_get_rbio(sock->ssl), (int)client_socket->handle, BIO_NOCLOSE);
+    BIO_ctrl(SSL_get_rbio(sock->ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, addr);
+    
+    //set the socket in accept state (for ssl)
+    SSL_set_accept_state(client_socket->ssl);
+
+    //reset the server socket in order to accept new connections
+    sock->ssl = NULL;
+    sock->retry_mode = SOCKET_RETRY_NONE;
+
+    return EASYSSL_SOCKET_SUCCESS;
+}
+
+
+//udp listen
+static int udp_accept_listen(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr) {
+    int err = DTLSv1_listen(sock->ssl, (BIO_ADDR*)addr);
+
+    //success
+    if (err >= 1) {
+        return udp_accept_listen_success(sock, new_socket, addr);
+    }
+
+    //retry
+    if (err == 0) {
+        sock->retry_mode = SOCKET_RETRY_SYSCALL;
+        return EASYSSL_SOCKET_RETRY;
+    }
+
+    //fatal error
+    udp_accept_listen_failure_cleanup(sock);
+    set_error(EASYSSL_ERROR_OPENSSL, ERR_get_error());
+    return EASYSSL_SOCKET_ERROR;
+}
+
+
+//udp accept initialization
+static int udp_accept_init(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr) {
+    clear_errors();
+
+    //the socket must not have an ssl
+    if (sock->ssl) {
+        set_einval("Invalid socket in function udp_accept_init.");
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //create context for udp if not yet created
+    SSL_CTX* ctx = udp_get_or_create_server_context(sock->security_data);
+
+    //if failed to create context
+    if (!ctx) {
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //create the ssl
+    if (!create_ssl(sock, ctx)) {
+        return EASYSSL_SOCKET_ERROR;
+    }
+
+    //init cookie verify context on the new socket
+    if (!init_cookie_verify_context(sock->ssl)) {
+        SSL_free(sock->ssl);
+        sock->ssl = NULL;
+        return EASYSSL_SOCKET_ERROR;
+    }
+    SSL_set_options(sock->ssl, SSL_OP_COOKIE_EXCHANGE);
+
+    //start listen mode
+    return udp_accept_listen(sock, new_socket, addr);
+}
+
+
 //udp accept
 static int udp_accept(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr) {
-    //TODO
-    return 0;
+    switch (sock->retry_mode) {
+        case SOCKET_RETRY_NONE:
+            return udp_accept_init(sock, new_socket, addr);
+
+        case SOCKET_RETRY_SYSCALL:
+            return udp_accept_listen(sock, new_socket, addr);
+    }
+
+    //invalid retry mode
+    set_einval("Invalid retry mode in function tcp_accept.");
+    return EASYSSL_SOCKET_ERROR;
 }
 
 
@@ -1213,8 +1398,15 @@ static int udp_connect_init(EASYSSL_SOCKET sock, const EASYSSL_SOCKET_ADDRESS* a
         return EASYSSL_SOCKET_ERROR;
     }
 
+    //connect the socket; for udp, it simply sets the peer address,
+    //so there is no need for any type of state loop
+    if (connect(sock->handle, &addr->sa, sizeof(EASYSSL_SOCKET_ADDRESS))) {
+        handle_socket_error();
+        return EASYSSL_SOCKET_ERROR;
+    }
+
     //continue with connecting the socket
-    return connect_socket_success(sock, addr);
+    return connect_socket_success(sock, addr, ctx);
 }
 
 
@@ -1534,6 +1726,15 @@ EASYSSL_BOOL EASYSSL_bind(EASYSSL_SOCKET socket, const EASYSSL_SOCKET_ADDRESS* a
         set_einval("null address in function EASYSSL_bind.");
         return EASYSSL_FALSE;
     }
+
+    //reuse the address and port before bind
+    //in order to avoid manual reuse address for servers;
+    //for the client, it does not matter, since bind is implicit via connect
+    char on = 1;
+    setsockopt(socket->handle, SOL_SOCKET, SO_REUSEADDR, &on, (socklen_t)sizeof(on));
+    #ifdef SO_REUSEPORT
+    setsockopt(socket->handle, SOL_SOCKET, SO_REUSEPORT, &on, (socklen_t)sizeof(on));
+    #endif
 
     //bind the socket
     if (bind(socket->handle, &addr->sa, sizeof(struct sockaddr_storage))) {

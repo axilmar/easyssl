@@ -163,7 +163,10 @@ static int unlock_mutex(MUTEX* m) { pthread_mutex_unlock(m); }
 
 
 //array static initialization
-#define ARRAY_INIT { NULL, 0 }
+#define ARRAY_INIT(A) {\
+        (A).data = NULL;\
+        (A).count = 0;\
+    }\
 
 
 //array for each
@@ -185,7 +188,7 @@ static int unlock_mutex(MUTEX* m) { pthread_mutex_unlock(m); }
 #define ARRAY_CLEANUP(A, DELETE_CB)\
     {\
         for(size_t i = (A).count; i > 0; --i) {\
-            DELETE_CB((A).data[i - 1]);\
+            DELETE_CB(&(A).data[i - 1]);\
         }\
         free((A).data);\
     }
@@ -247,6 +250,7 @@ static void clear_errors() {
     errno = 0;
     #ifdef _WIN32
     WSASetLastError(0);
+    SetLastError(0);
     #endif
     ERR_clear_error();
 }
@@ -274,12 +278,13 @@ static void set_einval(const char* format, ...) {
 //handle syscall error
 static void handle_syscall_error() {
     //try a winsock error
-#ifdef _WIN32
-    if (WSAGetLastError()) {
-        set_error(EASYSSL_ERROR_WINSOCK, WSAGetLastError());
+    #ifdef _WIN32
+    DWORD winError = GetLastError();
+    if (winError) {
+        set_error(EASYSSL_ERROR_WINSOCK, winError);
         return;
     }
-#endif
+    #endif
 
     //try a system error
     if (errno) {
@@ -320,6 +325,12 @@ static EASYSSL_BOOL copy_string(char** dst, const char* src) {
 }
 
 
+//free array member that is string
+static void free_array_string(char** str) {
+    free(*str);
+}
+
+
 //////////////////////////////////////////////////
 //  SOCKET FUNCTIONS
 //////////////////////////////////////////////////
@@ -327,25 +338,25 @@ static EASYSSL_BOOL copy_string(char** dst, const char* src) {
 
 //close a socket handle
 static void close_socket(EASYSSL_SOCKET_HANDLE sock) {
-#ifdef WIN32
+    #ifdef _WIN32
     closesocket(sock);
-#else
+    #else
     close(sock);
-#endif
+    #endif
 }
 
 
 //set socket blocking operation
 static EASYSSL_BOOL do_set_socket_blocking(EASYSSL_SOCKET_HANDLE socket, EASYSSL_BOOL blocking) {
-#ifdef _WIN32
+    #ifdef _WIN32
     unsigned long mode = blocking ? 0 : 1;
     return (ioctlsocket(socket, FIONBIO, &mode) == 0) ? EASYSSL_TRUE : EASYSSL_FALSE;
-#else
+    #else
     int flags = fcntl(socket, F_GETFL, 0);
     if (flags == -1) return EASYSSL_FALSE;
     flags = blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
     return (fcntl(fd, F_SETFL, flags) == 0) ? EASYSSL_TRUE : EASYSSL_FALSE;
-#endif
+    #endif
 }
 
 
@@ -745,11 +756,11 @@ static SSL_CTX* handle_context_creation(EASYSSL_SECURITY_DATA_STRUCT* sd, SSL_CT
     }
 
     //set the cipher lists
-    SSL_CTX_set_cipher_list(ctx, OSSL_default_cipher_list());
-    SSL_CTX_set_ciphersuites(ctx, OSSL_default_ciphersuites());
+    //SSL_CTX_set_cipher_list(ctx, OSSL_default_cipher_list());
+    //SSL_CTX_set_ciphersuites(ctx, OSSL_default_ciphersuites());
 
     //set the verification mode
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+    //SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
 
     //success; set the sd member; return the context
     *sd_member = ctx;
@@ -762,6 +773,10 @@ static void ssl_handshake_finished(const SSL* ssl, int where, int ret) {
     if (where & SSL_CB_HANDSHAKE_DONE) {
         restore_tcp_no_delay((SSL*)ssl);
         delete_cookie_verify_context((SSL*)ssl);
+    }
+
+    if (where & SSL_CB_ACCEPT_EXIT) {
+        int x = 0;
     }
 }
 
@@ -1276,7 +1291,7 @@ static void udp_accept_listen_failure_cleanup(EASYSSL_SOCKET sock) {
 }
 
 
-//udp listen success
+//success
 static int udp_accept_listen_success(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASYSSL_SOCKET_ADDRESS* addr) {
     //create the client socket
     EASYSSL_SOCKET client_socket = EASYSSL_socket(sock->security_data, addr->sa.sa_family, SOCK_DGRAM, 0, sock->blocking);
@@ -1305,8 +1320,6 @@ static int udp_accept_listen_success(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_so
         return EASYSSL_SOCKET_ERROR;
     }
 
-    //success
-
     //return client socket
     *new_socket = client_socket;
 
@@ -1316,9 +1329,6 @@ static int udp_accept_listen_success(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_so
     //set the ssl for the new client connection
     BIO_set_fd(SSL_get_rbio(sock->ssl), (int)client_socket->handle, BIO_NOCLOSE);
     BIO_ctrl(SSL_get_rbio(sock->ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, addr);
-    
-    //set the socket in accept state (for ssl)
-    SSL_set_accept_state(client_socket->ssl);
 
     //reset the server socket in order to accept new connections
     sock->ssl = NULL;
@@ -1405,6 +1415,9 @@ static int udp_accept_init(EASYSSL_SOCKET sock, EASYSSL_SOCKET* new_socket, EASY
         sock->ssl = NULL;
         return EASYSSL_SOCKET_ERROR;
     }
+
+    //set the SSL to accept state in order to finish the handshake
+    SSL_set_accept_state(sock->ssl);
 
     //start listen mode
     return udp_accept_listen(sock, new_socket, addr);
@@ -1641,12 +1654,12 @@ EASYSSL_BOOL EASYSSL_destroy_security_data(EASYSSL_SECURITY_DATA sd) {
 
     //free resources
     destroy_mutex(&sd->mutex);
-    ARRAY_CLEANUP(sd->verify_dirs, free);
-    ARRAY_CLEANUP(sd->verify_files, free);
-    ARRAY_CLEANUP(sd->verify_stores, free);
-    ARRAY_CLEANUP(sd->certificate_chain_files, free);
-    ARRAY_CLEANUP(sd->certificate_files, free);
-    ARRAY_CLEANUP(sd->private_key_files, free);
+    ARRAY_CLEANUP(sd->verify_dirs, free_array_string);
+    ARRAY_CLEANUP(sd->verify_files, free_array_string);
+    ARRAY_CLEANUP(sd->verify_stores, free_array_string);
+    ARRAY_CLEANUP(sd->certificate_chain_files, free_array_string);
+    ARRAY_CLEANUP(sd->certificate_files, free_array_string);
+    ARRAY_CLEANUP(sd->private_key_files, free_array_string);
 
     //success
     return EASYSSL_TRUE;
